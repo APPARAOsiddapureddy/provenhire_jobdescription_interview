@@ -1,0 +1,25 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "tasks": {
+    "gen:schema": {
+      "outputs": ["schema/**"]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["gen:schema"]
+    },
+    "@proven-hire/agent#test": {
+      "dependsOn": ["@proven-hire/shared#gen:schema"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

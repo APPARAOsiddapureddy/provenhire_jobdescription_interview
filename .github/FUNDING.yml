@@ -1,0 +1,15 @@
+# Funding sources for Proven Hire Job Description Interview.
+#
+# Proven Hire Job Description Interview is Apache-2.0 open-source software. Sponsorships fund the voice
+# infrastructure (LiveKit / STT / TTS / LLM) that makes free mock interviews
+# possible. Uncomment and fill in a line once the corresponding account exists —
+# leaving placeholder usernames active renders broken "Sponsor" buttons.
+#
+# Docs: https://docs.github.com/get-started/quickstart/customizing-your-repository
+
+# github: [proven-hire]                 # GitHub Sponsors username(s)
+# open_collective: proven-hire          # Open Collective slug
+# patreon: proven-hire                  # Patreon username
+# ko_fi: proven-hire                    # Ko-fi username
+# liberapay: proven-hire                # Liberapay username
+# custom: ["https://deepinterview.dev/sponsor"]  # Any other funding URL(s)
