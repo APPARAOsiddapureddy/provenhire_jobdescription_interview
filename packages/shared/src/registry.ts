@@ -8,6 +8,7 @@ import * as Ig from "./integrity";
 import * as I from "./interview-context";
 import * as J from "./job";
 import * as P from "./primitives";
+import * as Pr from "./proctoring";
 import * as Q from "./question";
 import * as R from "./room";
 import * as S from "./score";
@@ -47,4 +48,7 @@ export const SCHEMAS: Record<string, ZodType> = {
   KbQueryRequest: Api.KbQueryRequestSchema,
   KbQueryResponse: Api.KbQueryResponseSchema,
   IntegritySettings: Ig.IntegritySettingsSchema,
+  ProctoringEventCreate: Pr.ProctoringEventCreateSchema,
+  ProctoringEvent: Pr.ProctoringEventSchema,
+  ProctoringEventResponse: Pr.ProctoringEventResponseSchema,
 };

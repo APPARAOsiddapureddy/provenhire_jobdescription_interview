@@ -11,5 +11,6 @@ export * from "./interview-context";
 export * from "./room";
 export * from "./api";
 export * from "./integrity";
+export * from "./proctoring";
 export * from "./samples";
 export { SCHEMAS } from "./registry";

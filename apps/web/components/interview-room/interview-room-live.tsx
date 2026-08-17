@@ -135,6 +135,36 @@ export function InterviewRoomLive({
   const [ending, setEnding] = React.useState(false);
   const endingRef = React.useRef(false);
 
+  // Purely cosmetic "get ready" countdown so the room feels like it's
+  // starting immediately instead of sitting on a static "Ready when you
+  // are" while the interviewer's own on_enter() greeting is in flight
+  // server-side (LLM/TTS latency, possible worker cold start). Never gates
+  // anything real — the agent starts on its own regardless of this timer.
+  const [countdownValue, setCountdownValue] = React.useState<number | null>(
+    null,
+  );
+  const countdownStartedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!connected || countdownStartedRef.current) return;
+    countdownStartedRef.current = true;
+    setCountdownValue(3);
+    const interval = setInterval(() => {
+      setCountdownValue((v) => {
+        if (v === null || v <= 1) {
+          clearInterval(interval);
+          return null;
+        }
+        return v - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [connected]);
+  // If the agent actually starts speaking/listening before the countdown
+  // finishes, dismiss it immediately rather than obscuring the real start.
+  React.useEffect(() => {
+    if (phase !== "ready" && countdownValue !== null) setCountdownValue(null);
+  }, [phase, countdownValue]);
+
   /** Sends text into the SAME channel the agent's RoomIO consumes for typed
    * answers — the agent treats it as spoken, so "repeat"/"pause" are real
    * requests the (LLM-driven) interviewer actually receives and can act on,
@@ -224,8 +254,8 @@ export function InterviewRoomLive({
         onRepeatQuestion={repeatQuestion}
         onEndInterview={() => setShowConfirmEnd(true)}
         ending={ending}
-        showCountdown={false}
-        countdownValue={null}
+        showCountdown={countdownValue !== null}
+        countdownValue={countdownValue}
         showConfirmEnd={showConfirmEnd}
         onConfirmEnd={() => void endInterview()}
         onCancelEnd={() => setShowConfirmEnd(false)}

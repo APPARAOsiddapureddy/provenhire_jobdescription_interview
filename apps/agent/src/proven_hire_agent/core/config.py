@@ -210,6 +210,13 @@ class Settings(BaseSettings):
     shutdown_process_timeout_sec: float = 60.0
     transcript_flush_interval_sec: float = 20.0
 
+    # --- proctoring (Integrity Controls rework) -------------------------------
+    # Cumulative weighted-decay strike score at/above which a live interview
+    # is auto-ended (see core/proctoring/scoring.py). None = fall back to the
+    # default baked into packages/shared/data/proctoring-weights.json (25).
+    # Override via PROCTORING_STRIKE_THRESHOLD without touching that file.
+    proctoring_strike_threshold: float | None = None
+
     # --- post / scoring resilience -------------------------------------------
     # Per-stage timeout for the (latency-tolerant) scoring pipeline; on timeout
     # or error the stage degrades to a valid fallback instead of failing the

@@ -371,6 +371,38 @@ class IntegritySettings(BaseModel):
     updated_at: str | None = None
 
 
+# --- proctoring (generic event log, mirrors proctoring.ts) -------------------
+# The event-log layer underneath IntegritySettings above: `type` is a
+# free-form string (no enum) so a new detector never needs a migration.
+# Severity/enforcement level still comes from IntegritySettings.
+
+ProctoringSeverity = Literal["info", "warning", "critical"]
+
+
+class ProctoringEventCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str
+    type: str
+    severity: ProctoringSeverity
+    message: str
+    # A `data:` URL or an R2 https URL — never raw bytes. No max_length here:
+    # size ceilings are enforced in the route handler (matches PrepRequest's
+    # cv_url convention), keeping the generated JSON Schema in TS parity.
+    photo: str | None = None
+
+
+class ProctoringEvent(ProctoringEventCreate):
+    id: str
+    created_at: str
+
+
+class ProctoringEventResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event: ProctoringEvent
+    score: float
+    ban_triggered: bool
+
+
 # --- registry (mirrors packages/shared/src/registry.ts SCHEMAS) --------------
 
 MODELS: dict[str, type[BaseModel]] = {
@@ -407,4 +439,7 @@ MODELS: dict[str, type[BaseModel]] = {
     "KbQueryRequest": KbQueryRequest,
     "KbQueryResponse": KbQueryResponse,
     "IntegritySettings": IntegritySettings,
+    "ProctoringEventCreate": ProctoringEventCreate,
+    "ProctoringEvent": ProctoringEvent,
+    "ProctoringEventResponse": ProctoringEventResponse,
 }

@@ -18,6 +18,10 @@ from .persistence.integrity_repository import (
     IntegritySettingsRepository,
     get_integrity_repository,
 )
+from .persistence.proctoring_repository import (
+    ProctoringEventsRepository,
+    get_proctoring_repository,
+)
 from .persistence.repository import SessionRepository, get_repository
 
 
@@ -30,6 +34,7 @@ class Deps:
     knowledge: KnowledgeClient
     repo: SessionRepository
     integrity_repo: IntegritySettingsRepository
+    proctoring_repo: ProctoringEventsRepository
 
 
 def _assemble(settings: Settings) -> Deps:
@@ -41,6 +46,7 @@ def _assemble(settings: Settings) -> Deps:
         knowledge=get_knowledge(settings),
         repo=get_repository(settings),
         integrity_repo=get_integrity_repository(settings),
+        proctoring_repo=get_proctoring_repository(settings),
     )
 
 

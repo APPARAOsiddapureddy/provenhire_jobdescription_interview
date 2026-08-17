@@ -55,3 +55,9 @@ class SessionView(BaseModel):
     # "complete"). Surfaced here so the web report can read it through the agent
     # API — no Supabase/RLS/auth on the read path (OSS runs without sign-in).
     scorecard: ScoreCard | None = None
+    # Cumulative weighted-decay proctoring strike score (see core/proctoring/
+    # scoring.py), composed in api/session.py's get_session handler — NOT
+    # stored on the session row itself. None while the session has no
+    # recorded proctoring events (nothing to compute) or has reached a
+    # terminal status (no longer live, skip the lookup).
+    proctoring_score: float | None = None

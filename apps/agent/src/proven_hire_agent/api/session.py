@@ -14,11 +14,14 @@ capability-guarded: ids are unguessable uuid4.)
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.deps import build_deps
-from ..shared_models import InterviewContext
+from ..core.proctoring.scoring import compute_strike_score
+from ..shared_models import InterviewContext, ProctoringEvent
 from .auth import require_internal_secret
 from .views import SessionView
 
@@ -48,10 +51,36 @@ _TERMINAL_STATUSES = {"complete", "no_answers", "error", "rejected"}
 
 @router.get("/api/session/{session_id}", response_model=SessionView)
 async def get_session(session_id: str) -> SessionView:
-    view = await build_deps().repo.get_session_view(session_id)
+    deps = build_deps()
+    view = await deps.repo.get_session_view(session_id)
     if view is None:
         raise HTTPException(status_code=404, detail="Unknown session_id")
+    # Compose the live proctoring score onto the read model rather than
+    # storing it on the session row — see core/proctoring/scoring.py for why
+    # this is a pure recompute-on-read, not a stored/decremented value.
+    # Skipped once terminal: a finished interview's score is no longer live.
+    if view.status not in _TERMINAL_STATUSES:
+        events = await deps.proctoring_repo.list_events(session_id)
+        if events:
+            score = compute_strike_score(events, now=datetime.now(timezone.utc))
+            view = view.model_copy(update={"proctoring_score": score})
     return view
+
+
+@router.get(
+    "/api/session/{session_id}/proctoring-events",
+    response_model=list[ProctoringEvent],
+)
+async def get_proctoring_events(session_id: str) -> list[ProctoringEvent]:
+    """Full event list for a session — human review, not polled by the live room.
+
+    Ungated like the session read route above: capability-guarded by the
+    unguessable session_id, not the internal secret.
+    """
+    deps = build_deps()
+    if await deps.repo.get_session_view(session_id) is None:
+        raise HTTPException(status_code=404, detail="Unknown session_id")
+    return await deps.proctoring_repo.list_events(session_id)
 
 
 @router.post(

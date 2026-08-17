@@ -1,0 +1,13 @@
+{
+  "decay_per_step": 0.5,
+  "decay_step_sec": 300,
+  "strike_threshold_default": 25,
+  "weights": {
+    "multiple_faces": 1,
+    "camera_off": 1,
+    "screen_share_stopped": 0.5,
+    "window_blur": 0.5,
+    "face_missing": 0.25,
+    "fullscreen_exit": 0.25
+  }
+}
