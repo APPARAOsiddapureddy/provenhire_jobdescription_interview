@@ -1,0 +1,39 @@
+# Render deployment for the ProvenHire agent-api service (FastAPI, :8000).
+#
+# This is a standalone copy of the `api` stage from ./Dockerfile, trimmed to
+# just base+api. It exists because Render's Docker runtime builds a
+# Dockerfile's LAST stage with no way to pick an earlier --target, and the
+# main Dockerfile's last stage is the LiveKit `worker` (wrong service for
+# Render — that's deployed separately to LiveKit Cloud via `lk agent deploy`).
+# Keep this in sync with the `base`/`api` stages in ./Dockerfile.
+
+FROM python:3.11-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    AGENT_API_PORT=8000
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+
+RUN uv sync --frozen --no-dev --no-install-project --extra gemini --extra openai --extra supabase --extra tavily \
+ || uv sync --no-dev --no-install-project --extra gemini --extra openai --extra supabase --extra tavily
+
+FROM base AS api
+COPY src ./src
+RUN uv sync --frozen --no-dev --extra gemini --extra openai --extra supabase --extra tavily \
+ || uv sync --no-dev --extra gemini --extra openai --extra supabase --extra tavily
+
+RUN groupadd --system --gid 1001 appuser \
+ && useradd --system --uid 1001 --gid appuser appuser \
+ && chown -R appuser:appuser /app
+USER appuser
+ENV HOME=/app
+
+EXPOSE 8000
+
+CMD ["uv", "run", "uvicorn", "proven_hire_agent.app:app", "--host", "0.0.0.0", "--port", "8000"]
