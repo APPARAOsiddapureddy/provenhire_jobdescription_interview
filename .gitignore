@@ -52,3 +52,6 @@ apps/web/public/avatars/
 # Claude Code local machine state (permission allowlist, scheduler lock) —
 # personal, not project source.
 .claude/
+
+.vercel
+.env*
