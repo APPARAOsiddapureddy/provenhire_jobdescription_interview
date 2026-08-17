@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from proven_hire_agent.core.adapters.llm import OllamaLLM, get_llm
+from proven_hire_agent.core.adapters.llm import FallbackLLM, GeminiLLM, OllamaLLM, OpenAILLM, get_llm
 from proven_hire_agent.core.adapters.mock import (
     MockEmbeddings,
     MockLLM,
@@ -93,6 +93,10 @@ def _settings(**overrides):
         "ollama_model": "qwen3:8b",
         "local_api_key": "local",
         "llm_call_timeout_sec": 90.0,
+        "gemini_api_key": None,
+        "gemini_model": "gemini-3.6-flash",
+        "openai_api_key": None,
+        "openai_model": "gpt-5.1-mini",
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -149,3 +153,104 @@ def test_ollama_llm_retries_once_on_unparseable_json() -> None:
     assert len(calls) == 2, "expected exactly one retry"
     assert "could not be parsed as JSON" in calls[1], "retry must add the nudge"
     assert "could not be parsed as JSON" not in calls[0], "first call stays clean"
+
+
+# --- FallbackLLM + multi-provider get_llm() selection --------------------------
+
+
+class _FakeAdapter:
+    """A minimal LLMAdapter stand-in: succeeds, or raises, on command."""
+
+    def __init__(self, *, name: str, fails: bool = False) -> None:
+        self.name = name
+        self.fails = fails
+        self.calls = 0
+
+    async def complete_text(self, *, system: str, user: str) -> str:
+        return self.name
+
+    async def complete_json(self, *, system: str, user: str, schema: type):
+        self.calls += 1
+        if self.fails:
+            raise RuntimeError(f"{self.name} failed")
+        return build_mock(schema)
+
+
+def test_fallback_llm_uses_fallback_when_primary_fails() -> None:
+    primary = _FakeAdapter(name="primary", fails=True)
+    fallback = _FakeAdapter(name="fallback")
+    llm = FallbackLLM(primary, [fallback])
+    out = _run(llm.complete_json(system="s", user="u", schema=QuestionPlan))
+    assert isinstance(out, QuestionPlan)
+    assert primary.calls == 1
+    assert fallback.calls == 1
+
+
+def test_fallback_llm_reraises_primary_error_when_all_fail() -> None:
+    primary = _FakeAdapter(name="primary", fails=True)
+    fallback = _FakeAdapter(name="fallback", fails=True)
+    llm = FallbackLLM(primary, [fallback])
+    try:
+        _run(llm.complete_json(system="s", user="u", schema=QuestionPlan))
+    except RuntimeError as exc:
+        assert "primary failed" in str(exc), "must re-raise the PRIMARY's error"
+    else:
+        raise AssertionError("expected a RuntimeError")
+
+
+def test_fallback_llm_skips_fallbacks_when_primary_succeeds() -> None:
+    primary = _FakeAdapter(name="primary")
+    fallback = _FakeAdapter(name="fallback")
+    llm = FallbackLLM(primary, [fallback])
+    _run(llm.complete_json(system="s", user="u", schema=QuestionPlan))
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+def test_get_llm_single_configured_provider_returns_bare_adapter() -> None:
+    """Only one provider configured -> no FallbackLLM wrapping, today's behavior."""
+    llm = get_llm(_settings(llm_provider="gemini", gemini_api_key="g-key"))
+    assert isinstance(llm, GeminiLLM)
+
+
+def test_get_llm_wraps_in_fallback_when_multiple_providers_configured() -> None:
+    llm = get_llm(
+        _settings(
+            llm_provider="gemini",
+            gemini_api_key="g-key",
+            openai_api_key="o-key",
+        )
+    )
+    assert isinstance(llm, FallbackLLM)
+    assert isinstance(llm._primary, GeminiLLM)
+    assert len(llm._fallbacks) == 1
+    assert isinstance(llm._fallbacks[0], OpenAILLM)
+
+
+def test_get_llm_fallback_order_excludes_the_primary_provider() -> None:
+    """openai is primary; gemini is the only other one configured -> gemini-only
+    fallback list."""
+    llm = get_llm(
+        _settings(
+            llm_provider="openai",
+            openai_api_key="o-key",
+            gemini_api_key="g-key",
+        )
+    )
+    assert isinstance(llm, FallbackLLM)
+    assert isinstance(llm._primary, OpenAILLM)
+    assert len(llm._fallbacks) == 1
+    assert isinstance(llm._fallbacks[0], GeminiLLM)
+
+
+def test_get_llm_never_auto_falls_back_to_ollama() -> None:
+    """Settings.ollama_base_url has a non-empty DEFAULT even when nobody
+    configured it — so "present" can't mean "the user wants Ollama as a
+    fallback." A cloud primary with no other cloud key configured must return
+    the bare adapter, not a phantom FallbackLLM pointed at a local server that
+    was never started."""
+    llm = get_llm(_settings(llm_provider="gemini", gemini_api_key="g-key"))
+    assert isinstance(llm, GeminiLLM), (
+        "must NOT wrap in FallbackLLM just because ollama_base_url has its "
+        "default value"
+    )

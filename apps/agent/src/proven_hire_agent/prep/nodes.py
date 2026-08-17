@@ -32,6 +32,7 @@ from ..shared_models import (
 )
 from . import role_packs
 from .cv_extract import extract_cv_text
+from .follow_up_depth import FollowUpBudget, followup_budget
 from .prompts import (
     behavioral_round_prompts,
     coding_round_prompts,
@@ -315,6 +316,31 @@ async def _round_questions(
         return build_mock(_RoundQuestions).questions
 
 
+def _pin_general_followups(
+    questions: list[PlannedQuestion], budget: FollowUpBudget
+) -> list[PlannedQuestion]:
+    """Cap each technical question's followups to the depth budget, regardless
+    of what the model returned. The LAST technical question (the signature/case
+    question — same "last technical question" rule the prompt itself uses) gets
+    up to ``signature_followups_max``; every other technical question gets up
+    to ``technical_followups``. Intro/wrap questions are left untouched — the
+    prompt never asks for followups on them.
+    """
+    technical_indices = [i for i, q in enumerate(questions) if q.section == "technical"]
+    if not technical_indices:
+        return questions
+    signature_idx = technical_indices[-1]
+    pinned = list(questions)
+    for i in technical_indices:
+        cap = (
+            budget.signature_followups_max
+            if i == signature_idx
+            else budget.technical_followups
+        )
+        pinned[i] = pinned[i].model_copy(update={"followups": list(pinned[i].followups)[:cap]})
+    return pinned
+
+
 async def general_round(state: PrepState, deps: Deps) -> PrepState:
     """GENERAL round: intro + JD-weighted technical questions (anchored by
     one signature/case question with a follow-up tree) + a wrap question.
@@ -329,6 +355,7 @@ async def general_round(state: PrepState, deps: Deps) -> PrepState:
     band = role_packs.seniority_band(role_packs.infer_seniority(candidate))
     weights = role_packs.infer_competency_weights(family, band, job)
     counts = role_packs.allocate_question_counts(weights, _GENERAL_TECHNICAL_COUNT)
+    budget = followup_budget(req.follow_up_depth)
 
     hint = _skill_library_hint(company=company.name, role=job.title, level=job.seniority)
     system, user = general_round_prompts(
@@ -339,6 +366,7 @@ async def general_round(state: PrepState, deps: Deps) -> PrepState:
         language_mode=req.language_mode,
         weights=weights,
         counts=counts,
+        budget=budget,
         hint=hint,
     )
     questions = await _round_questions(
@@ -354,6 +382,7 @@ async def general_round(state: PrepState, deps: Deps) -> PrepState:
         q.model_copy(update={"section": q.section if q.section in valid_sections else "technical"})
         for q in questions
     ]
+    pinned = _pin_general_followups(pinned, budget)
     pinned = _reid(pinned, "gen")
     await _mark(state, deps, "general_round")
     return {"general_questions": pinned}
@@ -374,6 +403,7 @@ async def coding_round(state: PrepState, deps: Deps) -> PrepState:
     seniority = role_packs.infer_seniority(candidate)
     topic, difficulty = role_packs.select_coding_topic(family, job.tech_stack, seniority)
     topic_meta = role_packs.coding_topic_meta(family, topic)
+    budget = followup_budget(req.follow_up_depth)
 
     hint = _skill_library_hint(company=company.name, role=job.title, level=job.seniority)
     system, user = coding_round_prompts(
@@ -384,6 +414,7 @@ async def coding_round(state: PrepState, deps: Deps) -> PrepState:
         topic=topic,
         topic_meta=topic_meta,
         difficulty=difficulty,
+        followup_count=budget.coding_followups,
         hint=hint,
     )
     questions = await _round_questions(
@@ -399,7 +430,7 @@ async def coding_round(state: PrepState, deps: Deps) -> PrepState:
 
     pinned = []
     for q in questions:
-        followups = list(q.followups)[:1] or [topic_meta["hint"]]
+        followups = list(q.followups)[: budget.coding_followups] or [topic_meta["hint"]]
         pinned.append(
             q.model_copy(
                 update={
@@ -417,14 +448,15 @@ async def coding_round(state: PrepState, deps: Deps) -> PrepState:
 
 async def behavioral_round(state: PrepState, deps: Deps) -> PrepState:
     """BEHAVIORAL round: STAR-style questions grounded in specific CV
-    achievements, each with a pre-written individual-contribution follow-up
-    pinned into ``followups[0]``.
+    achievements, each with pre-written individual-contribution followups
+    pinned into ``followups[:budget.behavioral_followups]``.
     """
     req = state["req"]
     job = state["job"]
     candidate = state["candidate"]
     gap = state["gap"]
     company = state["company"]
+    budget = followup_budget(req.follow_up_depth)
 
     hint = _skill_library_hint(company=company.name, role=job.title, level=job.seniority)
     system, user = behavioral_round_prompts(
@@ -433,6 +465,7 @@ async def behavioral_round(state: PrepState, deps: Deps) -> PrepState:
         gap=gap,
         language_mode=req.language_mode,
         count=_BEHAVIORAL_COUNT,
+        followup_count=budget.behavioral_followups,
         hint=hint,
     )
     questions = await _round_questions(
@@ -445,7 +478,7 @@ async def behavioral_round(state: PrepState, deps: Deps) -> PrepState:
 
     pinned = []
     for q in questions:
-        followups = list(q.followups)[:1] or [_BEHAVIORAL_FALLBACK_PROBE]
+        followups = list(q.followups)[: budget.behavioral_followups] or [_BEHAVIORAL_FALLBACK_PROBE]
         pinned.append(q.model_copy(update={"section": "behavioral", "followups": followups}))
     pinned = _reid(pinned, "beh")
     await _mark(state, deps, "behavioral_round")

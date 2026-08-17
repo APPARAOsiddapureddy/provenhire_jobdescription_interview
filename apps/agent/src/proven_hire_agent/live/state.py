@@ -329,6 +329,101 @@ def difficulty_hint(ud: InterviewUserdata) -> str:
     return f"{sig.recommendation}: {sig.rationale}"
 
 
+# --- follow-up necessity (pure, livekit-free, deterministic) -----------------
+#
+# The live turn loop is deliberately network/LLM-free (see interviewer.py's
+# module docstring) — a per-turn classification LLM call would add a round
+# trip to every answer. This gives the model the same "is this answer thin or
+# hedgy" read via a pure local heuristic instead, exactly like
+# evaluate_difficulty/difficulty_hint above.
+
+_HEDGING_PHRASES: tuple[str, ...] = (
+    "i think",
+    "maybe",
+    "not sure",
+    "i guess",
+    "sort of",
+    "kind of",
+)
+
+
+@dataclass(frozen=True)
+class FollowUpSignal:
+    """An advisory read of whether the candidate's LATEST answer warrants a
+    follow-up probe. Fully derived from the current question + the answer text
+    + how many of the planned followups have already been used this turn;
+    never mutates anything.
+    """
+
+    should_follow_up: bool
+    reason: str
+    budget_remaining: int
+    hedging_detected: bool
+    thin_answer: bool
+
+
+def _has_hedging(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _HEDGING_PHRASES)
+
+
+def evaluate_followup_need(
+    ud: InterviewUserdata,
+    answer_text: str,
+    followups_asked_so_far: int = 0,
+) -> FollowUpSignal:
+    """Advisory follow-up read for the CURRENT question's latest answer.
+
+    ``followups_asked_so_far`` is self-reported by the live model (how many of
+    the current question's planned followups it has already asked this turn)
+    — the loop has no other way to know this: ``AnswerRecord`` only records
+    the FINAL answer once, after any mid-turn follow-ups already happened
+    conversationally, so there is no persisted per-followup counter to read.
+
+    Recommends a follow-up when the answer looks thin (short) or hedgy
+    (hedging language) AND the current question still has an unused planned
+    followup to spend; otherwise recommends moving on.
+    """
+    q = current_question(ud)
+    if q is None:
+        return FollowUpSignal(
+            should_follow_up=False,
+            reason="No active question.",
+            budget_remaining=0,
+            hedging_detected=False,
+            thin_answer=False,
+        )
+
+    thin = _word_count(answer_text) < _THIN_WORDS
+    hedging = _has_hedging(answer_text)
+    remaining = max(0, len(q.followups) - max(0, followups_asked_so_far))
+
+    if remaining == 0:
+        return FollowUpSignal(
+            should_follow_up=False,
+            reason="No planned followups left for this question — move on.",
+            budget_remaining=0,
+            hedging_detected=hedging,
+            thin_answer=thin,
+        )
+    if thin and hedging:
+        reason = "The answer is short AND hedges — worth one more probe."
+    elif thin:
+        reason = "The answer is short on substance — worth one more probe."
+    elif hedging:
+        reason = "The answer hedges (\"maybe\"/\"I think\"/...) — worth one more probe."
+    else:
+        reason = "The answer is substantive and confident — move on."
+
+    return FollowUpSignal(
+        should_follow_up=thin or hedging,
+        reason=reason,
+        budget_remaining=remaining,
+        hedging_detected=hedging,
+        thin_answer=thin,
+    )
+
+
 def compact_summary(ud: InterviewUserdata) -> str:
     """A short candidate summary string for the lean live prompt.
 

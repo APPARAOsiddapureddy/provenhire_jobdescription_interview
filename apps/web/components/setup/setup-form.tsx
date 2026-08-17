@@ -224,6 +224,7 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
         jd_text: jdText.trim(),
         company: company.trim(),
         language_mode,
+        follow_up_depth: "moderate",
       });
 
       if (!result.ok) {

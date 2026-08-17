@@ -18,6 +18,8 @@ scoring are deferred to a shutdown callback so they never block a turn.
 
 from __future__ import annotations
 
+import asyncio
+
 from livekit.agents import (
     AgentSession,
     JobContext,
@@ -659,24 +661,43 @@ async def _load_context_via_api(session_id: str, settings) -> InterviewContext |
     own job process), so the in-memory repo is not shared. Read the context from
     the API's ``GET /api/session/{id}`` SessionView instead. (With Supabase
     configured both processes share the store and either path works.)
+
+    Retries with a generous per-attempt timeout: a free-tier host for
+    AGENT_API_URL (e.g. Render) sleeps after idle and can take 30-60s to cold
+    start. This call is also usually the WORKER's own first action after ITS
+    cold start, so both sides can be waking up at once. A single short-timeout
+    attempt silently aborted the whole interview (agent joins, never speaks,
+    candidate sees nothing) — see worker cold-start incident 2026-08-17.
     """
     import httpx
 
     url = f"{_api_base(settings)}/api/session/{session_id}"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url)  # GET read path is unguarded
-    except Exception:
-        log.exception("worker: failed to reach %s", url)
-        return None
-    if resp.status_code != 200:
-        log.error("worker: GET %s -> %s", url, resp.status_code)
-        return None
-    ctx_data = resp.json().get("context")
-    if not ctx_data:
-        log.error("worker: session %s has no ready context", session_id)
-        return None
-    return InterviewContext.model_validate(ctx_data)
+    attempts = 4
+    per_attempt_timeout = 20.0
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=per_attempt_timeout) as client:
+                resp = await client.get(url)  # GET read path is unguarded
+        except Exception:
+            log.warning(
+                "worker: attempt %d/%d failed to reach %s", attempt, attempts, url,
+                exc_info=True,
+            )
+            if attempt < attempts:
+                await asyncio.sleep(5.0)
+            continue
+        if resp.status_code != 200:
+            log.error("worker: GET %s -> %s (attempt %d/%d)", url, resp.status_code, attempt, attempts)
+            if attempt < attempts:
+                await asyncio.sleep(5.0)
+            continue
+        ctx_data = resp.json().get("context")
+        if not ctx_data:
+            log.error("worker: session %s has no ready context", session_id)
+            return None
+        return InterviewContext.model_validate(ctx_data)
+    log.error("worker: exhausted %d attempts fetching %s", attempts, url)
+    return None
 
 
 # --- entrypoint --------------------------------------------------------------

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .rubric import quality_band_block
+
 if TYPE_CHECKING:
     from ..shared_models import (
         CandidateProfile,
@@ -53,11 +55,11 @@ def evaluate_answer_prompts(
     """
     system = (
         "You are a rigorous, fair interview assessor. Score the candidate's answer "
-        "to a single interview question against the provided rubric on a 0-5 scale "
-        "(0 = no relevant content, 3 = solid, 5 = exceptional). Weigh each rubric "
-        "criterion by its weight. Cite concrete evidence from the answer in the "
-        "evidence field. If no answer was given, assign a low score and say the "
-        "question was not answered. Respond ONLY with the requested schema."
+        "to a single interview question against the provided rubric on a 0-5 scale. "
+        f"{quality_band_block()} Weigh each rubric criterion by its weight. Cite "
+        "concrete evidence from the answer in the evidence field. If no answer was "
+        "given, assign a low score and say the question was not answered. Respond "
+        "ONLY with the requested schema."
     )
     answer_block = (
         answer_transcript.strip()
@@ -100,9 +102,9 @@ def verify_score_prompts(
         "JUSTIFIED by what the candidate actually said. "
         "If it is, set justified=true and repeat the original score as adjusted_score. "
         "If it is not, set justified=false and give a corrected adjusted_score on the "
-        "same 0-5 scale (0 = no relevant content, 3 = solid, 5 = exceptional) with a "
-        "brief reason. Be conservative; only move the score when the evidence clearly "
-        "warrants it. Respond ONLY with the requested schema."
+        f"same 0-5 scale with a brief reason. {quality_band_block()} Be conservative; "
+        "only move the score when the evidence clearly warrants it. Respond ONLY "
+        "with the requested schema."
     )
     transcript_block = (
         f"CANDIDATE'S ANSWER TRANSCRIPT:\n{transcript_excerpt}\n\n"
@@ -148,8 +150,10 @@ def model_answer_prompts(
 ) -> tuple[str, str]:
     """System/user prompts to draft an exemplary answer to one question."""
     system = (
-        "You are an expert interview coach. Write a concise, strong model answer to "
-        "the interview question below, tailored to this candidate's background so they "
+        "You are an expert interview coach. Write a model answer to the interview "
+        "question below that would score in the STRONG (4-5) band of the rubric "
+        f"below if graded against it — never a hollow, generic 'perfect' answer. "
+        f"{quality_band_block()} Tailor it to this candidate's background so they "
         "can study and reuse it. Use a clear structure (e.g. STAR for behavioral). "
         "Keep it under ~180 words. Respond with the model answer text only."
     )

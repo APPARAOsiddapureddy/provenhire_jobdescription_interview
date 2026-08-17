@@ -20,6 +20,7 @@ from ..shared_models import (
     LanguageMode,
     PrepRequest,
 )
+from .follow_up_depth import FollowUpBudget
 
 # Human-readable language names for the small set we support, so prompts can say
 # "also write Vietnamese" rather than leaking the raw code to the model.
@@ -160,16 +161,32 @@ def general_round_prompts(
     language_mode: LanguageMode,
     weights: dict[str, float],
     counts: dict[str, int],
+    budget: FollowUpBudget,
     hint: str = "",
 ) -> tuple[str, str]:
     """System/user prompts for the GENERAL round: intro + technical + wrap
     questions, JD-weighted across the given competency allocation, anchored
     by one deep signature/case question with a branching follow-up tree.
+
+    ``budget`` (see ``follow_up_depth.py``) sets how many followups ordinary
+    technical questions vs. the signature question should carry; ``nodes.py``
+    pins the model's output back to these counts regardless of what it returns.
     """
     allocation_lines = "\n".join(
         f'- {n} question(s) targeting competency "{comp}"'
         for comp, n in counts.items()
         if n > 0
+    )
+    ordinary_followup_line = (
+        "- followups: leave ordinary technical questions with NO followup "
+        "entries (empty list) — this interview asks only the scripted "
+        "question for those.\n"
+        if budget.technical_followups == 0
+        else (
+            f"- followups: exactly {budget.technical_followups} entr"
+            f"{'y' if budget.technical_followups == 1 else 'ies'} per ordinary "
+            "technical question (a concrete probe, not 'can you elaborate').\n"
+        )
     )
     system = (
         "You are a senior interviewer designing the GENERAL / TECHNICAL round "
@@ -194,15 +211,15 @@ def general_round_prompts(
         "concretely, (b) one strong-hire signal (a specific phrase/behavior), "
         "and (c) one red flag (a specific weak/wrong answer pattern) — like a "
         "real interviewer's notes, not a rubric template.\n"
-        "- followups: exactly one entry per ordinary technical question (a "
-        "concrete probe, not 'can you elaborate').\n"
+        f"{ordinary_followup_line}"
         "- SIGNATURE QUESTION: make the LAST technical question a deeper, "
         "multi-part end-to-end case/system question anchored in this "
         "company's actual product/domain — the single hardest, most "
         "discriminating question in the interview. Give it followups as an "
-        "ORDERED ADAPTIVE FOLLOW-UP TREE: 4-8 entries, each a natural next "
-        "probe building on the previous, covering distinct sub-topics rather "
-        "than repeating the same angle.\n"
+        "ORDERED ADAPTIVE FOLLOW-UP TREE: "
+        f"{budget.signature_followups_min}-{budget.signature_followups_max} "
+        "entries, each a natural next probe building on the previous, "
+        "covering distinct sub-topics rather than repeating the same angle.\n"
         "- LENIENCY: topics flagged NICE-TO-HAVE below should be probed "
         "supportively (framed as 'how would you approach/learn X'), not used "
         "as a hard rejection axis; topics flagged MUST-HAVE should be probed "
@@ -240,12 +257,15 @@ def coding_round_prompts(
     topic: str,
     topic_meta: dict,
     difficulty: int,
+    followup_count: int,
     hint: str = "",
 ) -> tuple[str, str]:
     """System/user prompts for the CODING round: exactly one spoken,
     think-aloud problem grounded in a deterministically-selected topic +
-    difficulty (see ``role_packs.select_coding_topic``).
+    difficulty (see ``role_packs.select_coding_topic``). ``followup_count``
+    (see ``follow_up_depth.py``) sets how many hint entries to request.
     """
+    followup_word = "y" if followup_count == 1 else "ies"
     system = (
         "You are a senior interviewer designing the CODING round: exactly ONE "
         "spoken, think-aloud problem. There is NO code editor — the candidate "
@@ -262,10 +282,11 @@ def coding_round_prompts(
         "fix'), a strong-hire signal, and a red flag (e.g. 'jumps straight to "
         "\"add more servers\"/\"use Redis, it's faster\" without diagnosing "
         "first') — NOT a 'correct syntax' criterion, since there is no editor.\n"
-        "- followups: write EXACTLY ONE entry — the single hint to give if the "
-        "candidate stalls. Must be a nudge toward the next reasoning step, "
-        "never the answer itself. The live interviewer uses this verbatim "
-        "instead of improvising.\n"
+        f"- followups: write EXACTLY {followup_count} entr{followup_word} — "
+        "hint(s) to give if the candidate stalls, each a nudge toward the "
+        "next reasoning step, never the answer itself, each one going a "
+        "little further than the last if there is more than one. The live "
+        "interviewer uses these verbatim instead of improvising.\n"
         f"Write the question's text with an 'en' entry.{_localize_note(language_mode)} "
         "Respond ONLY with the requested schema (a single question)."
     )
@@ -286,12 +307,15 @@ def behavioral_round_prompts(
     gap: GapAnalysis,
     language_mode: LanguageMode,
     count: int,
+    followup_count: int,
     hint: str = "",
 ) -> tuple[str, str]:
     """System/user prompts for the BEHAVIORAL round: ``count`` STAR-style
     questions, each grounded in a specific CV achievement/project, each with
-    a pre-written individual-contribution follow-up in ``followups[0]``.
+    ``followup_count`` (see ``follow_up_depth.py``) pre-written
+    individual-contribution followups pinned into ``followups[:followup_count]``.
     """
+    followup_word = "y" if followup_count == 1 else "ies"
     system = (
         f"You are a senior interviewer designing the BEHAVIORAL round: {count} "
         "STAR-style question(s), one story at a time ('Tell me about a time "
@@ -301,11 +325,12 @@ def behavioral_round_prompts(
         "- Prefer target_competency values about judgment, ownership, "
         "collaboration, or leadership (from gap.gaps / gap.probe_targets) "
         "rather than raw technical skill — that belongs in the other rounds.\n"
-        "- followups: write EXACTLY ONE entry per question — a probe for the "
-        "candidate's OWN specific decision or action, phrased to pull the 'I' "
-        "out of the 'we' (e.g. 'What did YOU specifically decide/say/do here "
-        "— not what the team decided?'). The live interviewer asks this "
-        "verbatim as its one follow-up.\n"
+        f"- followups: write EXACTLY {followup_count} entr{followup_word} per "
+        "question — probes for the candidate's OWN specific decision or "
+        "action, phrased to pull the 'I' out of the 'we' (e.g. 'What did YOU "
+        "specifically decide/say/do here — not what the team decided?'), each "
+        "one pushing further than the last if there is more than one. The "
+        "live interviewer asks these verbatim as its followups.\n"
         "- rubric: 2-3 RubricItems; descriptions should reward concreteness of "
         "the candidate's individual contribution (names their own specific "
         "decision, can explain the reasoning) and flag the red flag of "

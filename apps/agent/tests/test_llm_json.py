@@ -76,3 +76,45 @@ def test_loads_json_leaves_cloud_responses_untouched() -> None:
     """No <think> tags means byte-identical behaviour for Gemini/OpenAI."""
     assert _loads_json('{"a": 1}') == {"a": 1}
     assert _loads_json('```json\n{"a": 1}\n```') == {"a": 1}
+
+
+# --- truncated-JSON repair (a stalled/max-token-clipped response) -------------
+
+
+def test_loads_json_repairs_truncated_object() -> None:
+    """Cut off mid-object (missing closing braces) still parses."""
+    assert _loads_json('{"a": 1, "b": {"c": 2') == {"a": 1, "b": {"c": 2}}
+
+
+def test_loads_json_repairs_truncated_array() -> None:
+    assert _loads_json('[1, 2, 3') == [1, 2, 3]
+
+
+def test_loads_json_repairs_truncated_mid_string() -> None:
+    """Cut off mid-string value: the repair closes the string too."""
+    assert _loads_json('{"a": "hello') == {"a": "hello"}
+
+
+def test_loads_json_still_raises_on_genuine_garbage() -> None:
+    """No opener at all -> nothing to repair, the original error still fires."""
+    import json
+
+    try:
+        _loads_json("not json at all, just prose")
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("expected a JSONDecodeError")
+
+
+def test_loads_json_still_raises_on_malformed_but_balanced_json() -> None:
+    """Balanced brackets but genuinely invalid content (missing a value) is NOT
+    a truncation — repair must not paper over real malformed JSON."""
+    import json
+
+    try:
+        _loads_json('{"a": }')
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("expected a JSONDecodeError")

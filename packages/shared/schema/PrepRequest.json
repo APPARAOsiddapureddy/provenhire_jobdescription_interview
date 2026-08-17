@@ -38,6 +38,15 @@
         "mixed"
       ]
     },
+    "follow_up_depth": {
+      "default": "moderate",
+      "type": "string",
+      "enum": [
+        "light",
+        "moderate",
+        "deep"
+      ]
+    },
     "user_id": {
       "type": "string"
     }

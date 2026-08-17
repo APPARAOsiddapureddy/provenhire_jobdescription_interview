@@ -85,7 +85,56 @@ def _loads_json(text: str) -> Any:
                 return obj
             except json.JSONDecodeError:
                 continue
+    # Last resort: the response was likely cut off mid-object (a stalled
+    # stream, a hit max-tokens ceiling) rather than genuinely malformed —
+    # try closing the unbalanced brackets and parsing once more.
+    repaired = _repair_truncated_json(t)
+    if repaired is not None:
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
     raise json.JSONDecodeError("no JSON value found in LLM response", t, 0)
+
+
+def _repair_truncated_json(t: str) -> str | None:
+    """Best-effort repair for a JSON value truncated mid-object/array: track a
+    bracket stack (respecting string/escape state) from the first ``{``/``[``
+    and, if unbalanced at EOF, close it by appending the matching closers (and
+    a closing quote if truncated mid-string).
+
+    Returns ``None`` when there is nothing to repair (no opener found, or the
+    brackets are already balanced — i.e. this text is not the "cut off before
+    closing" case and a genuine parse failure is the right outcome). This does
+    NOT recover a value truncated mid-token (e.g. a dangling ``"score": 4.`` or
+    a trailing comma before EOF) — only a complete run of key/value pairs that
+    simply never got its closing brackets.
+    """
+    start = next((i for i, ch in enumerate(t) if ch in "{["), None)
+    if start is None:
+        return None
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in t[start:]:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    if not stack:
+        return None
+    closing = ('"' if in_string else "") + "".join(reversed(stack))
+    return t[start:] + closing
 
 
 class GeminiLLM:
@@ -241,34 +290,118 @@ class OllamaLLM(OpenAILLM):
             )
 
 
+class FallbackLLM:
+    """Wraps a primary adapter; on a ``complete_json`` failure, retries each
+    configured fallback adapter once, in order, before giving up.
+
+    Re-raises the ORIGINAL primary exception if every fallback also fails (not
+    the last fallback's exception), so a caller's degrade-to-mock warning log
+    still names the actually-configured provider rather than whichever
+    fallback happened to fail last. ``complete_text`` is NOT covered — it goes
+    straight to the primary, matching every current call site's tolerance for
+    single-provider behavior on that path.
+    """
+
+    def __init__(self, primary: LLMAdapter, fallbacks: list[LLMAdapter]) -> None:
+        self._primary = primary
+        self._fallbacks = fallbacks
+
+    async def complete_text(self, *, system: str, user: str) -> str:
+        return await self._primary.complete_text(system=system, user=user)
+
+    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+        try:
+            return await self._primary.complete_json(system=system, user=user, schema=schema)
+        except Exception as primary_exc:  # noqa: BLE001 - fall through to fallbacks below
+            for fallback in self._fallbacks:
+                try:
+                    return await fallback.complete_json(system=system, user=user, schema=schema)
+                except Exception:  # noqa: BLE001 - try the next fallback
+                    continue
+            log.warning(
+                "FallbackLLM: primary and all %d fallback(s) failed; re-raising the "
+                "primary's error.",
+                len(self._fallbacks),
+            )
+            raise primary_exc
+
+
+# Fixed priority order fallbacks are tried in, skipping whichever is primary.
+# Not currently configurable — a reasonable fixed default rather than a new
+# setting, since this only matters when MULTIPLE providers happen to have keys
+# configured at once. Deliberately EXCLUDES "ollama": unlike gemini_api_key/
+# openai_api_key (None unless the user opts in), Settings.ollama_base_url has
+# a non-empty default ("http://localhost:11434/v1") even when nobody set it —
+# so "base_url is present" can't tell apart "I run a local model" from "the
+# field is just sitting at its default." Auto-adding it as a fallback would
+# mean nearly every cloud-primary deployment silently gets a phantom fallback
+# to a local server that was never actually started, wasting a connection
+# attempt/timeout on every primary failure before it re-raises anyway. Ollama
+# can still be the PRIMARY provider (llm_provider=ollama, unaffected by this).
+_PROVIDER_FALLBACK_ORDER: tuple[str, ...] = ("gemini", "openai")
+
+
+def _build_adapter(provider: str, settings: Settings) -> LLMAdapter | None:
+    """Construct the adapter for ``provider`` if its config is present, else
+    ``None``. Uses ``getattr`` (not direct attribute access) so probing a
+    provider OTHER than the one named in ``settings.llm_provider`` can't raise
+    on a minimal/test ``Settings`` stand-in that only defines the fields its
+    own scenario needs.
+    """
+    # Model-name fallbacks below mirror core/config.py's own Settings defaults —
+    # they only ever fire against a test double that omits the field; the real
+    # Settings class always sets its own value, so this changes nothing there.
+    timeout = getattr(settings, "llm_call_timeout_sec", _DEFAULT_TIMEOUT_SEC)
+    if provider == "gemini":
+        api_key = getattr(settings, "gemini_api_key", None)
+        if api_key:
+            model = getattr(settings, "gemini_model", "gemini-3.6-flash")
+            return GeminiLLM(api_key, model, timeout)
+        return None
+    if provider == "openai":
+        api_key = getattr(settings, "openai_api_key", None)
+        if api_key:
+            model = getattr(settings, "openai_model", "gpt-5.1-mini")
+            return OpenAILLM(api_key, model, timeout)
+        return None
+    if provider in {"ollama", "vllm", "llamacpp", "lmstudio", "local"}:
+        base_url = getattr(settings, "ollama_base_url", None)
+        if base_url:
+            return OllamaLLM(
+                getattr(settings, "local_api_key", ""),
+                getattr(settings, "ollama_model", "qwen3:8b"),
+                timeout,
+                base_url=base_url,
+            )
+        return None
+    return None
+
+
 def get_llm(settings: Settings) -> LLMAdapter:
-    """Choose an LLM adapter from settings, falling back to the mock."""
+    """Choose an LLM adapter from settings, falling back to the mock.
+
+    When the configured provider is set up AND at least one OTHER provider
+    also has its config present, the returned adapter is wrapped in a
+    :class:`FallbackLLM` so a single flaky/rate-limited provider doesn't force
+    every caller straight to the generic mock plan when another real provider
+    is available. With only one provider configured (the common case), this
+    returns the primary adapter unchanged — today's exact behavior.
+    """
     provider = (settings.llm_provider or "mock").lower()
     if provider == "mock":
         return MockLLM()
-    timeout = getattr(settings, "llm_call_timeout_sec", _DEFAULT_TIMEOUT_SEC)
-    if provider == "gemini":
-        if settings.gemini_api_key:
-            return GeminiLLM(settings.gemini_api_key, settings.gemini_model, timeout)
-        log.warning("llm_provider=gemini but gemini_api_key is missing; using MockLLM.")
+
+    normalized = "ollama" if provider in {"vllm", "llamacpp", "lmstudio", "local"} else provider
+    primary = _build_adapter(provider, settings)
+    if primary is None:
+        log.warning("llm_provider=%s but its config is missing; using MockLLM.", provider)
         return MockLLM()
-    if provider == "openai":
-        if settings.openai_api_key:
-            return OpenAILLM(settings.openai_api_key, settings.openai_model, timeout)
-        log.warning("llm_provider=openai but openai_api_key is missing; using MockLLM.")
-        return MockLLM()
-    if provider in {"ollama", "vllm", "llamacpp", "lmstudio", "local"}:
-        # Local: a base URL takes the place of an API key. Everything else in
-        # the factory contract is unchanged — missing config still degrades to
-        # the mock rather than failing the pipeline.
-        if settings.ollama_base_url:
-            return OllamaLLM(
-                settings.local_api_key,
-                settings.ollama_model,
-                timeout,
-                base_url=settings.ollama_base_url,
-            )
-        log.warning("llm_provider=%s but ollama_base_url is missing; using MockLLM.", provider)
-        return MockLLM()
-    log.warning("Unknown llm_provider=%r; using MockLLM.", provider)
-    return MockLLM()
+
+    fallbacks = [
+        adapter
+        for other in _PROVIDER_FALLBACK_ORDER
+        if other != normalized
+        for adapter in [_build_adapter(other, settings)]
+        if adapter is not None
+    ]
+    return FallbackLLM(primary, fallbacks) if fallbacks else primary

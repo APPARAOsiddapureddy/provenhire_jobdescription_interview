@@ -15,7 +15,7 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
-import type { LanguageMode } from "@proven-hire/shared";
+import type { FollowUpDepth, LanguageMode } from "@proven-hire/shared";
 import { startSession } from "@/app/setup/actions";
 import { cn } from "@/lib/cn";
 import {
@@ -27,6 +27,16 @@ import {
 
 const YEARS_OPTIONS = ["0-1", "1-2", "2-4", "4-6", "6+"] as const;
 type YearsBucket = (typeof YEARS_OPTIONS)[number];
+
+const FOLLOW_UP_DEPTH_OPTIONS: {
+  value: FollowUpDepth;
+  label: string;
+  detail: string;
+}[] = [
+  { value: "light", label: "Light", detail: "Mostly scripted questions, minimal probing." },
+  { value: "moderate", label: "Moderate", detail: "A balanced mix — the default." },
+  { value: "deep", label: "Deep", detail: "Digs in with more follow-ups per question." },
+];
 
 const STAGES = [
   {
@@ -102,6 +112,7 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [years, setYears] = useState<YearsBucket>("2-4");
+  const [followUpDepth, setFollowUpDepth] = useState<FollowUpDepth>("moderate");
 
   const [cvTouched, setCvTouched] = useState(false);
   const [jdTouched, setJdTouched] = useState(false);
@@ -238,6 +249,7 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
         jd_text: jdText.trim(),
         company: "",
         language_mode,
+        follow_up_depth: followUpDepth,
       });
 
       if (!result.ok) {
@@ -445,6 +457,30 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
               </PHChip>
             ))}
           </div>
+        </PHSurface>
+
+        <PHSurface className="flex flex-col gap-2 rounded-2xl p-5">
+          <label className="text-[13px] font-medium text-[var(--ph-text-1)]">
+            Follow-up depth
+          </label>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {FOLLOW_UP_DEPTH_OPTIONS.map((d) => (
+              <PHChip
+                key={d.value}
+                type="button"
+                active={followUpDepth === d.value}
+                onClick={() => setFollowUpDepth(d.value)}
+              >
+                {d.label}
+              </PHChip>
+            ))}
+          </div>
+          <p className="text-[12px] text-[var(--ph-text-3)]">
+            {
+              FOLLOW_UP_DEPTH_OPTIONS.find((d) => d.value === followUpDepth)
+                ?.detail
+            }
+          </p>
         </PHSurface>
 
         <PHSurface className="flex flex-col gap-2 rounded-2xl p-5">

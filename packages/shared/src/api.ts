@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { CitationSchema } from "./company";
-import { LanguageSchema, LanguageModeSchema } from "./primitives";
+import {
+  FollowUpDepthSchema,
+  LanguageSchema,
+  LanguageModeSchema,
+} from "./primitives";
 import { ScoreCardSchema } from "./score";
 
 export const PrepRequestSchema = z.object({
@@ -8,6 +12,10 @@ export const PrepRequestSchema = z.object({
   jd_text: z.string(),
   company: z.string(),
   language_mode: LanguageModeSchema,
+  // How many live follow-up probes the plan should seed per question. Defaults
+  // to "moderate" (this project's pre-existing behavior — see
+  // apps/agent/.../prep/follow_up_depth.py for the light/moderate/deep table).
+  follow_up_depth: FollowUpDepthSchema.default("moderate"),
   // Owning user (Supabase auth uid). Optional so the offline/dev path (no auth)
   // still validates; when present the agent stamps it on the `sessions` row so
   // the report's RLS read (`auth.uid() = user_id`) can see the row.

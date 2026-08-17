@@ -50,6 +50,13 @@ def _followup_note(q: PlannedQuestion | None) -> str:
     planned hint / individual-contribution probe / follow-up tree instead of
     improvising one blind — this was previously seeded into the plan at prep
     time and then never read anywhere in the live loop.
+
+    ``followups`` length is driven by the prep-time follow-up depth (see
+    ``prep/follow_up_depth.py``): light/moderate ordinary questions carry 0-1
+    entries, but a "deep"-depth interview can seed 2+ on an ORDINARY question
+    too, not just the general round's signature/case question — so this must
+    describe "N planned follow-ups" generically rather than assuming any
+    multi-entry list is the signature question's tree.
     """
     followups = list(q.followups) if q is not None else []
     if not followups:
@@ -61,10 +68,11 @@ def _followup_note(q: PlannedQuestion | None) -> str:
         )
     numbered = "\n".join(f"  {i + 1}. {f}" for i, f in enumerate(followups))
     return (
-        "\nThis is the signature case question with a planned follow-up tree. "
-        "After the candidate's initial answer, work through 2-4 of the "
-        "following adaptively based on what they said (skip ones already "
-        f"covered), roughly in order:\n{numbered}\n"
+        f"\nThis question has {len(followups)} planned follow-ups. After the "
+        "candidate's initial answer, work through them adaptively based on "
+        "what they said (skip ones already covered, stop once you have a "
+        f"solid answer — you don't have to use all {len(followups)}), "
+        f"roughly in order:\n{numbered}\n"
     )
 
 
@@ -85,7 +93,9 @@ def build_instructions(ud: InterviewUserdata) -> str:
         f"{_followup_note(q)}\n"
         "Ask this one question, listen to the full answer, then ask at most one "
         "light follow-up (unless a follow-up tree is given above — see its own "
-        "instructions). When the answer is complete, call submit_answer with the "
+        "instructions). If the answer feels thin or hedgy and you're unsure "
+        "whether to probe further, you may call get_followup_signal for an "
+        "advisory read. When the answer is complete, call submit_answer with the "
         "candidate's answer to record it and move to the next question. Use "
         "next_section to move to a different round, request_clarification only if "
         "the candidate seems confused. Never read the rubric aloud."
@@ -216,6 +226,28 @@ class Interviewer(Agent):
         network, no blocking) and never changes the question cursor.
         """
         return state.difficulty_hint(context.userdata)
+
+    @function_tool
+    async def get_followup_signal(
+        self,
+        context: RunContext[InterviewUserdata],
+        answer_so_far: str,
+        followups_asked_so_far: int = 0,
+    ) -> str:
+        """Advisory read on whether the candidate's answer needs a follow-up.
+
+        OPTIONAL and non-binding: call it only if the answer feels thin or hedgy
+        and you're unsure whether to probe further or move on. ``answer_so_far``
+        is the candidate's answer text; ``followups_asked_so_far`` is how many
+        follow-ups you've already asked on this question this turn (0 if none
+        yet). Computed locally (no network, no blocking) and never changes the
+        question cursor.
+        """
+        sig = state.evaluate_followup_need(
+            context.userdata, answer_so_far, followups_asked_so_far
+        )
+        verdict = "follow up" if sig.should_follow_up else "move on"
+        return f"{verdict}: {sig.reason}"
 
     @function_tool
     async def request_clarification(

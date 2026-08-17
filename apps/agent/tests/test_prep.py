@@ -12,6 +12,7 @@ import asyncio
 
 from proven_hire_agent.core.deps import build_deps
 from proven_hire_agent.prep import nodes, role_packs, run_prep
+from proven_hire_agent.prep.follow_up_depth import followup_budget
 from proven_hire_agent.shared_models import (
     CandidateProfile,
     CompanyIntel,
@@ -25,12 +26,15 @@ from proven_hire_agent.shared_models import (
 )
 
 
-def _request(primary: str = "en", mixed: bool = False) -> PrepRequest:
+def _request(
+    primary: str = "en", mixed: bool = False, follow_up_depth: str = "moderate"
+) -> PrepRequest:
     return PrepRequest(
         cv_url="https://example.com/cv.pdf",
         jd_text="Senior Backend Engineer building distributed payment systems in Python.",
         company="ExampleCorp",
         language_mode=LanguageMode(primary=primary, mixed=mixed),
+        follow_up_depth=follow_up_depth,
     )
 
 
@@ -139,7 +143,7 @@ class _RecordingKnowledge:
 
 def test_run_prep_ingests_materials_keyed_by_session_id(monkeypatch) -> None:
     """Prep must ingest the CV/JD/company intel into the knowledge store keyed by
-    session_id — the SAME key the Study Coach retrieves with — so the grounded
+    session_id -- the SAME key the Study Coach retrieves with -- so the grounded
     coach loop is reachable (the WP-8 acceptance was structurally unmet before)."""
     deps = build_deps()
     recorder = _RecordingKnowledge()
@@ -149,7 +153,7 @@ def test_run_prep_ingests_materials_keyed_by_session_id(monkeypatch) -> None:
 
     assert recorder.ingests, "prep must ingest the prep materials"
     key, files = recorder.ingests[0]
-    # Keyed by session_id (not user.id) — aligns ingest with the coach's query key.
+    # Keyed by session_id (not user.id) -- aligns ingest with the coach's query key.
     assert key == session_id
     blob = "\n\n".join(files)
     assert "CANDIDATE CV" in blob
@@ -197,7 +201,7 @@ class _EmptyFollowupsLLM:
         return schema(questions=[question])
 
 
-def _minimal_prep_state() -> dict:
+def _minimal_prep_state(follow_up_depth: str = "moderate") -> dict:
     candidate = CandidateProfile(
         name="Test Candidate",
         headline="Backend Engineer",
@@ -232,7 +236,13 @@ def _minimal_prep_state() -> dict:
     gap = GapAnalysis(
         strengths=[], gaps=[], probe_targets=[], matched_skills=[], missing_skills=[], summary=""
     )
-    return {"req": _request(), "candidate": candidate, "job": job, "company": company, "gap": gap}
+    return {
+        "req": _request(follow_up_depth=follow_up_depth),
+        "candidate": candidate,
+        "job": job,
+        "company": company,
+        "gap": gap,
+    }
 
 
 def test_coding_round_backfills_hint_when_llm_returns_empty_followups(monkeypatch) -> None:
@@ -260,3 +270,109 @@ def test_behavioral_round_backfills_probe_when_llm_returns_empty_followups(monke
     for q in questions:
         assert len(q.followups) == 1
         assert q.followups[0] == nodes._BEHAVIORAL_FALLBACK_PROBE
+
+
+# --- follow-up depth budget (light/moderate/deep) -----------------------------
+#
+# `moderate` is covered exhaustively above (it's the default `_request()` uses,
+# and reproduces the pre-depth hard-coded behavior byte for byte). These cover
+# light/deep specifically: the round nodes must CAP the model's output to the
+# requested depth's budget, not just backfill when it returns nothing.
+
+
+class _ManyFollowupsLLM:
+    """Stub LLM: always answers with ``n_questions`` PlannedQuestions carrying
+    MORE followups (``n_followups``) than any depth budget allows, to prove the
+    round nodes actually CAP followups to the budget rather than trusting
+    whatever count the model returned.
+    """
+
+    def __init__(self, *, n_followups: int = 15, section: str = "technical", n_questions: int = 1) -> None:
+        self._n_followups = n_followups
+        self._section = section
+        self._n_questions = n_questions
+
+    async def complete_text(self, *, system: str, user: str) -> str:
+        return ""
+
+    async def complete_json(self, *, system: str, user: str, schema):
+        followups = [f"probe {i}" for i in range(self._n_followups)]
+        questions = [
+            PlannedQuestion(
+                id=f"raw-{i}",
+                section=self._section,
+                text={"en": f"question {i}"},
+                difficulty=3,
+                rubric=[RubricItem(criterion="c", weight=1.0, description="d")],
+                followups=list(followups),
+                target_competency="placeholder",
+            )
+            for i in range(self._n_questions)
+        ]
+        return schema(questions=questions)
+
+
+def test_coding_round_caps_followups_to_light_budget(monkeypatch) -> None:
+    deps = build_deps()
+    monkeypatch.setattr(deps, "llm", _ManyFollowupsLLM(n_followups=15))
+    state = _minimal_prep_state(follow_up_depth="light")
+
+    result = asyncio.run(nodes.coding_round(state, deps))
+    assert len(result["coding_questions"][0].followups) == followup_budget("light").coding_followups
+
+
+def test_coding_round_caps_followups_to_deep_budget(monkeypatch) -> None:
+    deps = build_deps()
+    monkeypatch.setattr(deps, "llm", _ManyFollowupsLLM(n_followups=15))
+    state = _minimal_prep_state(follow_up_depth="deep")
+
+    result = asyncio.run(nodes.coding_round(state, deps))
+    assert len(result["coding_questions"][0].followups) == followup_budget("deep").coding_followups
+
+
+def test_behavioral_round_caps_followups_to_deep_budget(monkeypatch) -> None:
+    deps = build_deps()
+    monkeypatch.setattr(deps, "llm", _ManyFollowupsLLM(n_followups=15))
+    state = _minimal_prep_state(follow_up_depth="deep")
+
+    result = asyncio.run(nodes.behavioral_round(state, deps))
+    budget = followup_budget("deep")
+    assert all(len(q.followups) == budget.behavioral_followups for q in result["behavioral_questions"])
+
+
+def test_general_round_caps_ordinary_vs_signature_followups_separately(monkeypatch) -> None:
+    """The LAST technical question (the signature/case question) gets the wider
+    signature budget; every other technical question gets the ordinary budget.
+    """
+    deps = build_deps()
+    monkeypatch.setattr(
+        deps, "llm", _ManyFollowupsLLM(n_followups=15, section="technical", n_questions=3)
+    )
+    state = _minimal_prep_state(follow_up_depth="deep")
+
+    result = asyncio.run(nodes.general_round(state, deps))
+    technical = [q for q in result["general_questions"] if q.section == "technical"]
+    assert len(technical) == 3
+    budget = followup_budget("deep")
+    assert len(technical[-1].followups) == budget.signature_followups_max
+    for q in technical[:-1]:
+        assert len(q.followups) == budget.technical_followups
+
+
+def test_general_round_light_depth_leaves_ordinary_technical_questions_empty(monkeypatch) -> None:
+    """At "light" depth, ordinary technical questions carry NO followups -- only
+    the signature question keeps a (smaller) tree. This is the one case where
+    the blanket "every question has >=1 followup" assumption from the default-
+    moderate full-pipeline test does NOT hold.
+    """
+    deps = build_deps()
+    monkeypatch.setattr(
+        deps, "llm", _ManyFollowupsLLM(n_followups=15, section="technical", n_questions=3)
+    )
+    state = _minimal_prep_state(follow_up_depth="light")
+
+    result = asyncio.run(nodes.general_round(state, deps))
+    technical = [q for q in result["general_questions"] if q.section == "technical"]
+    budget = followup_budget("light")
+    assert all(len(q.followups) == 0 for q in technical[:-1])
+    assert len(technical[-1].followups) == budget.signature_followups_max

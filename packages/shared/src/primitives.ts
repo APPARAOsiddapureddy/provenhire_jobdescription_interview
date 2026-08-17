@@ -56,6 +56,9 @@ export const MasteryLevelSchema = z.enum([
 ]);
 export type MasteryLevel = z.infer<typeof MasteryLevelSchema>;
 
+export const FollowUpDepthSchema = z.enum(["light", "moderate", "deep"]);
+export type FollowUpDepth = z.infer<typeof FollowUpDepthSchema>;
+
 export const LanguageModeSchema = z.object({
   primary: LanguageSchema,
   mixed: z.boolean(),

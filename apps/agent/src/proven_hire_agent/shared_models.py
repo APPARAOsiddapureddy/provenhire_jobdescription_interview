@@ -17,6 +17,7 @@ Language = Literal["en", "vi", "es", "zh", "hi", "id", "pt", "fr", "de", "ja"]
 Section = Literal["intro", "behavioral", "technical", "coding", "wrap"]
 Seniority = Literal["intern", "junior", "mid", "senior", "staff", "principal"]
 MasteryLevel = Literal["weak", "developing", "solid", "strong"]
+FollowUpDepth = Literal["light", "moderate", "deep"]
 
 
 def _validate_localized_text(v: dict[str, str]) -> dict[str, str]:
@@ -295,6 +296,12 @@ class PrepRequest(BaseModel):
     jd_text: str
     company: str
     language_mode: LanguageMode
+    # How many live follow-up probes the plan should seed per question (see
+    # prep/follow_up_depth.py). Defaults to "moderate", which reproduces the
+    # counts this project used before the field existed (1 ordinary technical
+    # follow-up, 4-8 on the signature question, 1 coding hint, 1 behavioral
+    # probe) — so omitting it is fully backward-compatible.
+    follow_up_depth: FollowUpDepth = "moderate"
     # Owning user (Supabase auth uid). Optional so the offline/dev path (no auth)
     # still validates; when present it is stamped on the `sessions` row so the
     # report's RLS read (auth.uid() = user_id) can see the row. Mirrors api.ts.
