@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import {
   isLiveKitConfigured,
+  isR2Configured,
   isSupabaseConfigured,
   serverEnv,
 } from "@/lib/env";
@@ -79,6 +80,10 @@ export default async function InterviewPage({
   }
 
   const persona = getPersona(personaId);
+  // Screen recording needs somewhere to put the recording — gate it on R2
+  // being configured (same pattern as the CV upload path), computed
+  // server-side since the client can't see server env.
+  const r2Configured = isR2Configured();
 
   // Mint a token only when LiveKit is configured; otherwise preview mode.
   let token: string | null = null;
@@ -96,7 +101,13 @@ export default async function InterviewPage({
     const JOINABLE = new Set(["prep", "ready"]);
     if (!JOINABLE.has(session.status)) {
       return (
-        <LiveRoom sessionId={id} persona={persona} token={null} url={null} />
+        <LiveRoom
+          sessionId={id}
+          persona={persona}
+          token={null}
+          url={null}
+          r2Configured={r2Configured}
+        />
       );
     }
 
@@ -111,5 +122,13 @@ export default async function InterviewPage({
     url = minted.url;
   }
 
-  return <LiveRoom sessionId={id} persona={persona} token={token} url={url} />;
+  return (
+    <LiveRoom
+      sessionId={id}
+      persona={persona}
+      token={token}
+      url={url}
+      r2Configured={r2Configured}
+    />
+  );
 }

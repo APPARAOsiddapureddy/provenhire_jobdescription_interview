@@ -344,6 +344,26 @@ class KbQueryResponse(BaseModel):
     citations: list[Citation]
 
 
+# --- integrity (proctoring settings, mirrors integrity.ts) -------------------
+
+IntegrityRuleState = Literal["off", "monitor", "strict"]
+
+
+class IntegritySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ai_behavior_analysis: IntegrityRuleState
+    camera_required: IntegrityRuleState
+    copy_paste_detection: IntegrityRuleState
+    devtools_detection: IntegrityRuleState
+    fullscreen_required: IntegrityRuleState
+    microphone_monitoring: IntegrityRuleState
+    camera_ai_detection: IntegrityRuleState
+    three_strike_auto_end: IntegrityRuleState
+    screen_recording_enabled: IntegrityRuleState
+    tab_switching_detection: IntegrityRuleState
+    updated_at: str | None = None
+
+
 # --- registry (mirrors packages/shared/src/registry.ts SCHEMAS) --------------
 
 MODELS: dict[str, type[BaseModel]] = {
@@ -379,4 +399,5 @@ MODELS: dict[str, type[BaseModel]] = {
     "KbIngestResponse": KbIngestResponse,
     "KbQueryRequest": KbQueryRequest,
     "KbQueryResponse": KbQueryResponse,
+    "IntegritySettings": IntegritySettings,
 }

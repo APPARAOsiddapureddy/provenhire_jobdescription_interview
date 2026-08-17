@@ -146,7 +146,7 @@ def add_turn(ud: InterviewUserdata, role: str, text: str) -> None:
 def reconstruct_answers(ud: InterviewUserdata) -> int:
     """Recover unsaved answers from the verbatim transcript (shutdown fallback).
 
-    ``ctx.answers`` is normally filled by the model calling the ``save_answer``
+    ``ctx.answers`` is normally filled by the model calling the ``submit_answer``
     tool — but the model can forget, and the candidate can hang up mid-question
     before the tool ever fires. Both used to silently drop everything the
     candidate said, flipping the session to ``no_answers`` ("no report") even
@@ -165,7 +165,7 @@ def reconstruct_answers(ud: InterviewUserdata) -> int:
       honest ``no_answers`` state instead of getting a junk scorecard.
     * "Saved" matches the scorers' last-wins indexing (``{a.question_id: a}``):
       a question only counts as saved if its LAST record has substance, so a
-      trailing ``save_answer("")`` cannot simultaneously void a question and
+      trailing ``submit_answer("")`` cannot simultaneously void a question and
       block its recovery.
 
     Known residual: a candidate continuing their previous answer after the

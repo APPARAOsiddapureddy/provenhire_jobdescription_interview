@@ -7,8 +7,8 @@ must NOT be imported by ``live/__init__.py`` (keep the offline
 
 Each persona SUBCLASSES :class:`Interviewer` — in LiveKit Agents 1.x function
 tools are per-agent, so a persona must inherit the shared interview tools
-(save_answer, get_next_question, ...) or the model is ordered to call tools
-that do not exist and the cursor/answer log silently stop advancing. The
+(submit_answer, ...) or the model is ordered to call tools that do not exist
+and the cursor/answer log silently stop advancing. The
 handoff site passes the running ``chat_ctx`` so the persona keeps the
 conversation history (a bare ``Agent`` starts from an empty context), and each
 persona overrides ``on_enter`` to drive its round opening proactively — a
@@ -23,15 +23,19 @@ from .interviewer import Interviewer, _localized
 _CODING_INSTRUCTIONS = (
     "You are now running the CODING round. Pose one focused, hands-on problem "
     "tied to the candidate's stack. Ask them to think aloud; nudge with a single "
-    "hint if they stall. Do not lecture. When the problem is resolved or time is "
-    "tight, call save_answer then get_next_question."
+    "hint if they stall. If a planned follow-up/hint is shown in your "
+    "instructions above, use it verbatim instead of inventing one. Do not "
+    "lecture. When the problem is resolved or time is tight, call submit_answer "
+    "to record it and move on."
 )
 
 _BEHAVIORAL_INSTRUCTIONS = (
     "You are now running the BEHAVIORAL round. Ask one STAR-style question at a "
     "time about real past experience. Listen, then ask exactly one probing "
-    "follow-up for specifics (the 'I' not the 'we'). Then call save_answer and "
-    "get_next_question. Warm, concise, never leading."
+    "follow-up for specifics (the 'I' not the 'we'). If a planned follow-up is "
+    "shown in your instructions above, use it verbatim — it's already written "
+    "to target their individual contribution. Then call submit_answer to "
+    "record it and move on. Warm, concise, never leading."
 )
 
 

@@ -71,9 +71,20 @@ class TranscriptFlusher:
         transcript = list(self._ud.transcript)
         if len(transcript) <= self._last_len:
             return
-        with contextlib.suppress(Exception):
+        try:
             await self._flush(self._ud.ctx, transcript)
             self._last_len = len(transcript)
+        except Exception:
+            # Swallowed intentionally — a transient flush failure must not
+            # crash the detached checkpoint loop (see class docstring). But
+            # silent-and-unlogged meant a persistently failing checkpoint
+            # endpoint (bad URL, network partition, auth misconfig) left this
+            # durability feature doing nothing for a whole interview with no
+            # way to diagnose it after a crash.
+            log.warning(
+                "transcript_flusher: checkpoint failed, will retry next tick",
+                exc_info=True,
+            )
 
     async def _run(self) -> None:
         try:

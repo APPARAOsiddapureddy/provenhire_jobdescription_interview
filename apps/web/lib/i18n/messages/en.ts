@@ -7,6 +7,8 @@ export const en = {
     cancel: "Cancel",
     loading: "Loading…",
     error: "Something went wrong.",
+    integrityTrustLine:
+      "ProvenHire uses integrity monitoring to ensure fair assessments.",
   },
   nav: {
     setup: "Setup",

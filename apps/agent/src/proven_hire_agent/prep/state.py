@@ -17,6 +17,7 @@ from ..shared_models import (
     CompanyIntel,
     GapAnalysis,
     JobSpec,
+    PlannedQuestion,
     PrepRequest,
     QuestionPlan,
 )
@@ -35,4 +36,9 @@ class PrepState(TypedDict, total=False):
     job: JobSpec
     company: CompanyIntel
     gap: GapAnalysis
+    # Per-round question lists (general/coding/behavioral), joined by
+    # assemble_plan into the final `plan` below.
+    general_questions: list[PlannedQuestion]
+    coding_questions: list[PlannedQuestion]
+    behavioral_questions: list[PlannedQuestion]
     plan: QuestionPlan

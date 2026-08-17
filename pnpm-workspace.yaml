@@ -7,5 +7,6 @@ packages:
 # approving them here, `pnpm install` fails with ERR_PNPM_IGNORED_BUILDS in
 # CI/Docker (non-interactive).
 allowBuilds:
+  core-js: true
   esbuild: true
   sharp: true

@@ -16,15 +16,20 @@ Design rules (project golden rule #2: keep the live loop lean):
   the running ``chat_ctx`` so the conversation history survives the handoff.
 - The flat ``ud.transcript`` log is fed by the worker's ``conversation_item_added``
   listener (real STT/agent turns) — tools no longer write to it, so answers are
-  captured even when the model forgets to call ``save_answer``.
+  captured even when the model forgets to call ``submit_answer``.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from livekit.agents import Agent, RunContext, function_tool
 
 from . import state
 from .state import InterviewUserdata
+
+if TYPE_CHECKING:
+    from ..shared_models import PlannedQuestion
 
 
 def _localized(text: dict[str, str], primary: str) -> str:
@@ -37,6 +42,29 @@ def _wrap_signal() -> str:
         "INTERVIEW_COMPLETE: thank the candidate warmly in one or two sentences, "
         "tell them their feedback report will be ready shortly, and then call "
         "end_interview to close the session."
+    )
+
+
+def _followup_note(q: PlannedQuestion | None) -> str:
+    """Surface the plan's seeded ``followups`` so the live model uses the
+    planned hint / individual-contribution probe / follow-up tree instead of
+    improvising one blind — this was previously seeded into the plan at prep
+    time and then never read anywhere in the live loop.
+    """
+    followups = list(q.followups) if q is not None else []
+    if not followups:
+        return ""
+    if len(followups) == 1:
+        return (
+            "\nPlanned follow-up (use verbatim if the candidate needs a nudge "
+            f"— don't invent your own): {followups[0]}\n"
+        )
+    numbered = "\n".join(f"  {i + 1}. {f}" for i, f in enumerate(followups))
+    return (
+        "\nThis is the signature case question with a planned follow-up tree. "
+        "After the candidate's initial answer, work through 2-4 of the "
+        "following adaptively based on what they said (skip ones already "
+        f"covered), roughly in order:\n{numbered}\n"
     )
 
 
@@ -53,10 +81,12 @@ def build_instructions(ud: InterviewUserdata) -> str:
         "voice mock interview. Speak naturally and concisely.\n\n"
         f"{summary}\n\n"
         f"Primary language: {primary}.\n"
-        f"Current question to ask: {question_line}\n\n"
+        f"Current question to ask: {question_line}\n"
+        f"{_followup_note(q)}\n"
         "Ask this one question, listen to the full answer, then ask at most one "
-        "light follow-up. When the answer is complete, call save_answer with the "
-        "candidate's answer, then call get_next_question to proceed. Use "
+        "light follow-up (unless a follow-up tree is given above — see its own "
+        "instructions). When the answer is complete, call submit_answer with the "
+        "candidate's answer to record it and move to the next question. Use "
         "next_section to move to a different round, request_clarification only if "
         "the candidate seems confused. Never read the rubric aloud."
     )
@@ -111,23 +141,45 @@ class Interviewer(Agent):
         )
 
     @function_tool
-    async def save_answer(
+    async def submit_answer(
         self,
         context: RunContext[InterviewUserdata],
         answer: str,
         started_at: str = "",
         ended_at: str = "",
     ) -> str:
-        """Record the candidate's answer to the current question.
+        """Record the candidate's answer to the current question AND advance
+        to the next one, in a single call — call this once the candidate has
+        finished answering. ``answer`` is the candidate's spoken answer text.
 
-        Call this once the candidate has finished answering, BEFORE
-        get_next_question. ``answer`` is the candidate's spoken answer text.
+        This used to be two separate tools (``save_answer`` then
+        ``get_next_question``), which meant the interview's advancement
+        depended on the live model reliably making TWO sequential tool
+        calls after every answer. Confirmed live (2026-08-17): a real
+        session got stuck on the cursor's starting question indefinitely —
+        STT was transcribing the candidate's speech correctly the entire
+        time, but the cursor never moved because the second tool call
+        never landed. Merging them into one atomic action removes that
+        failure mode: there is no longer a valid intermediate state where
+        the answer is saved but the interview doesn't advance (or vice
+        versa) — a shutdown-time fallback (``state.reconstruct_answers``)
+        already existed for the total-miss case, but it only ever ran once
+        the session was already over, which does nothing for how "stuck"
+        the live experience feels in the moment.
         """
         ud = context.userdata
-        record = state.save_answer(
+        state.save_answer(
             ud, transcript=answer, started_at=started_at, ended_at=ended_at
         )
-        return f"Saved answer for question {record.question_id}."
+        state.advance(ud)
+        if state.is_complete(ud):
+            return _wrap_signal()
+        q = state.current_question(ud)
+        assert q is not None  # not complete -> a current question exists
+        primary = ud.ctx.plan.language_mode.primary
+        text = _localized(q.text, primary)
+        await self._refresh_instructions(ud)
+        return f"Saved. Next question ({q.section}): {text}"
 
     async def _refresh_instructions(self, ud: InterviewUserdata) -> None:
         """Re-sync the system prompt with the advanced cursor (best-effort).
@@ -140,20 +192,6 @@ class Interviewer(Agent):
             await self.update_instructions(build_instructions(ud))
         except Exception:  # noqa: BLE001, S110 - prompt refresh must never break a turn
             pass
-
-    @function_tool
-    async def get_next_question(self, context: RunContext[InterviewUserdata]) -> str:
-        """Advance to the next planned question and return it (or a wrap signal)."""
-        ud = context.userdata
-        state.advance(ud)
-        if state.is_complete(ud):
-            return _wrap_signal()
-        q = state.current_question(ud)
-        assert q is not None  # not complete -> a current question exists
-        primary = ud.ctx.plan.language_mode.primary
-        text = _localized(q.text, primary)
-        await self._refresh_instructions(ud)
-        return f"Next question ({q.section}): {text}"
 
     @function_tool
     async def next_section(self, context: RunContext[InterviewUserdata]) -> str:

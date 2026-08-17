@@ -14,6 +14,10 @@ from .adapters.knowledge import KnowledgeClient, get_knowledge
 from .adapters.llm import get_llm
 from .adapters.search import get_search
 from .config import Settings, get_settings
+from .persistence.integrity_repository import (
+    IntegritySettingsRepository,
+    get_integrity_repository,
+)
 from .persistence.repository import SessionRepository, get_repository
 
 
@@ -25,6 +29,7 @@ class Deps:
     embeddings: EmbeddingsAdapter
     knowledge: KnowledgeClient
     repo: SessionRepository
+    integrity_repo: IntegritySettingsRepository
 
 
 def _assemble(settings: Settings) -> Deps:
@@ -35,6 +40,7 @@ def _assemble(settings: Settings) -> Deps:
         embeddings=get_embeddings(settings),
         knowledge=get_knowledge(settings),
         repo=get_repository(settings),
+        integrity_repo=get_integrity_repository(settings),
     )
 
 

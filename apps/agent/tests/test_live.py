@@ -6,10 +6,12 @@ pass with the optional ``livekit-agents`` extra absent. A valid
 deterministic default adapters (MockLLM / MockSearch / MemoryRepository) — no
 keys, no network.
 
-The mock ``QuestionPlan`` carries exactly one question (all section ``intro``),
-so for the ``next_section`` case we augment the plan with a second question in a
-different section. Each test builds its OWN ``InterviewUserdata`` so cursor
-mutations never leak between assertions.
+The round-separated mock plan (one mock question per round: general/coding/
+behavioral) carries more than one question, so for tests that need a plan
+with EXACTLY two questions in two specific sections, ``_userdata_two_sections``
+overwrites ``ctx.plan.questions`` outright rather than relying on how many
+questions the underlying mock plan happens to produce. Each test builds its
+OWN ``InterviewUserdata`` so cursor mutations never leak between assertions.
 """
 
 from __future__ import annotations
@@ -49,12 +51,16 @@ def _userdata() -> InterviewUserdata:
 
 
 def _userdata_two_sections() -> InterviewUserdata:
-    """A userdata whose plan has a second question in a different section."""
+    """A userdata whose plan has EXACTLY two questions, in two different
+    sections. Overwrites ``ctx.plan.questions`` outright (rather than
+    appending to whatever the mock plan produced) so these tests stay
+    independent of how many questions the round-separated mock plan happens
+    to contain.
+    """
     ctx = _build_context()
-    first = ctx.plan.questions[0]
-    # The mock first question is section "intro"; append a "behavioral" one.
+    first = ctx.plan.questions[0].model_copy(update={"id": "q_intro", "section": "intro"})
     second = first.model_copy(update={"id": "q_behavioral", "section": "behavioral"})
-    ctx.plan.questions.append(second)
+    ctx.plan.questions[:] = [first, second]
     return InterviewUserdata(ctx=ctx, session_id=ctx.session_id)
 
 

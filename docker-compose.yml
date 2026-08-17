@@ -34,8 +34,7 @@ services:
 
   agent-api:
     build:
-      context: .
-      dockerfile: apps/agent/Dockerfile
+      context: ./apps/agent
       target: api
     command:
       - uv
@@ -81,8 +80,7 @@ services:
   # the `live` profile so it does not block the base stack.
   agent-worker:
     build:
-      context: .
-      dockerfile: apps/agent/Dockerfile
+      context: ./apps/agent
       target: worker
     profiles:
       - live

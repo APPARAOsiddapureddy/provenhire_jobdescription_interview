@@ -216,11 +216,12 @@ class OllamaLLM(OpenAILLM):
     one way that matters: **it retries once when the response doesn't parse.**
 
     Why only here. Small local models are markedly worse at emitting strict JSON
-    than Gemini/GPT, and this pipeline's largest schema (``QuestionPlan``) is
-    also its keystone — when it fails, ``prep.nodes.question_planner`` silently
-    swaps in the generic mock plan and the candidate sits through an interview
-    whose questions are titled "mock". That exact failure has shipped before.
-    One cheap retry with a blunter instruction converts most near-misses
+    than Gemini/GPT, and each round-generation node (``prep.nodes.general_round``
+    / ``coding_round`` / ``behavioral_round``) still risks the same failure mode
+    on a parse miss: it silently swaps in a generic mock question set and the
+    candidate sits through an interview whose questions are titled "mock". That
+    exact failure has shipped before. One cheap retry with a blunter instruction
+    converts most near-misses
     (a stray preamble, a truncated trailing brace) into a usable plan; the cloud
     adapters stay single-shot so their latency and cost are unchanged.
     """

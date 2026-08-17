@@ -4,7 +4,9 @@
 -- no payments and no per-tier interview limit. Payments/plan-gating (WP-11) live
 -- in the private cloud fork, not here. This migration drops the billing schema
 -- that 0002 added (and the plan/usage columns 0001 carried), leaving a lean
--- profiles table: { id, email, locale, created_at, updated_at }.
+-- profiles table: { id, email, locale, created_at }. (No `updated_at` —
+-- profiles is effectively write-once after signup, so it never got the
+-- touch_updated_at() trigger that sessions/integrity_settings carry.)
 --
 -- Forward-only and idempotent (`if exists`): on a DB that applied 0002 it drops
 -- the real objects; on a fresh DB (which applies 0002 then this) the drops are

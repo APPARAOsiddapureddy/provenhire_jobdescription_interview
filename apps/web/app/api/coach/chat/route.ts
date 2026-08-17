@@ -16,9 +16,11 @@ export const dynamic = "force-dynamic";
  * Client body. session_id is optional (the /prep surface may have no live
  * session); it only scopes knowledge retrieval. lang falls back to "en".
  */
+// 10_000 matches the agent's own ceiling (api/coach.py's _MAX_QUERY_LEN) —
+// reject oversized input here too so it never even reaches the agent.
 const BodySchema = z.object({
   session_id: z.string().default("anonymous"),
-  query: z.string().min(1),
+  query: z.string().min(1).max(10_000),
   lang: LanguageSchema.catch("en").default("en"),
 });
 

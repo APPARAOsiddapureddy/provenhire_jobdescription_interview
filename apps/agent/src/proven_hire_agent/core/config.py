@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.6-flash"
     # Newest flash-lite. Gemini 3.x on the live path needs livekit-plugins-google
     # >=1.6, which threads the "thought_signature" through function-call turns
-    # (1.5.x dropped it -> 400 INVALID_ARGUMENT after the first save_answer).
+    # (1.5.x dropped it -> 400 INVALID_ARGUMENT after the first submit_answer).
     # Pin an exact id here, never a "-latest" alias: the live loop's function
     # calling must not change models under us. Override: GEMINI_MODEL_LIVE.
     gemini_model_live: str = "gemini-3.5-flash-lite"
@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # Cartesia can't speak (e.g. Vietnamese). eleven_flash_v2_5 is ~75ms-latency
     # and covers 32 languages incl. vi. Override via ELEVENLABS_MODEL.
     elevenlabs_model: str = "eleven_flash_v2_5"
+    # Cartesia voice for the English interviewer — "Janani - Calm Professional"
+    # (Cartesia's Indian-English catalog), matching an Indian candidate's own
+    # accent/fluency for a more natural practice session. Verified live against
+    # Cartesia's /tts/bytes endpoint (real audio, 200 OK) before wiring in.
+    # Override via CARTESIA_VOICE_ID with any id from the Cartesia voice
+    # library (https://play.cartesia.ai/voices) — filter country=IN for more.
+    cartesia_voice_id: str = "fb7d8d97-9730-4165-bd79-36b5ce61b5f2"
 
     # --- local (self-hosted) model servers ------------------------------------
     # The "runs 100% local, no cloud model keys" path. All three speak the

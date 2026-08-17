@@ -74,11 +74,15 @@ def _prep_userdata() -> tuple[Deps, InterviewUserdata]:
 
 
 def _add_behavioral_question(ud: InterviewUserdata) -> None:
-    """Augment the one-question mock plan with a second, different-section question."""
+    """Reduce the plan to EXACTLY two questions: the first as-is, plus a
+    second appended in the behavioral section. Overwrites ``ctx.plan.questions``
+    outright (rather than appending to whatever the round-separated mock plan
+    produced) so coverage-percentage assertions stay exact and independent of
+    how many questions the underlying mock plan happens to contain.
+    """
     first = ud.ctx.plan.questions[0]
-    ud.ctx.plan.questions.append(
-        first.model_copy(update={"id": "q_behavioral", "section": "behavioral"})
-    )
+    second = first.model_copy(update={"id": "q_behavioral", "section": "behavioral"})
+    ud.ctx.plan.questions[:] = [first, second]
 
 
 def _post_live_result(
@@ -360,6 +364,9 @@ def test_recovered_answer_reaches_report_as_answered_coverage() -> None:
     """The recovered question id reads as ANSWERED in the report itself: full
     coverage_pct, a model answer for it, and competencies drawn from the plan."""
     _deps, ud = _prep_userdata()
+    # Trim to exactly one question so "fully covered" is unambiguous — the
+    # round-separated mock plan otherwise carries one question per round.
+    ud.ctx.plan.questions[:] = ud.ctx.plan.questions[:1]
     client = _client()
     q1 = state.current_question(ud)
     assert q1 is not None
@@ -372,7 +379,7 @@ def test_recovered_answer_reaches_report_as_answered_coverage() -> None:
     assert view["status"] == "complete"
     sc = ScoreCard.model_validate(view["scorecard"])
 
-    # The single-question mock plan was fully covered by the RECOVERED answer.
+    # The single-question plan was fully covered by the RECOVERED answer.
     assert sc.coverage_pct == 1.0
     assert {ma.question_id for ma in sc.model_answers} == {q1.id}
     # The recovered answer produced real competency scores mapped to the plan.

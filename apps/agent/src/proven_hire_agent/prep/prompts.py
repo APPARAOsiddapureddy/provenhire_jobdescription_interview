@@ -122,17 +122,18 @@ def gap_matching_prompts(candidate: CandidateProfile, job: JobSpec) -> tuple[str
     return system, user
 
 
-# --- question planner --------------------------------------------------------
+# --- round-separated question generation --------------------------------------
+#
+# Three focused prompts replace the old single `question_planner_prompts()`
+# keystone call — one per live round (general, coding, behavioral). Each
+# takes deterministic role-pack selections (role family, competency weights/
+# counts, coding topic/difficulty) computed by `role_packs.py` *before* the
+# call, so the LLM is told exactly what to produce rather than asked to
+# infer it fresh; `nodes.py` pins the same selections back onto the result
+# afterward regardless of what the model returns (see its module docstring).
 
 
-def question_planner_prompts(
-    candidate: CandidateProfile,
-    job: JobSpec,
-    company: CompanyIntel,
-    gap: GapAnalysis,
-    language_mode: LanguageMode,
-) -> tuple[str, str]:
-    """System/user prompts for the keystone interview-plan generation node."""
+def _localize_note(language_mode: LanguageMode) -> str:
     primary = language_mode.primary
     primary_name = language_name(primary)
     also_localize = (
@@ -148,38 +149,179 @@ def question_planner_prompts(
         if language_mode.mixed
         else ""
     )
+    return f"{also_localize}{mixed_note}"
+
+
+def general_round_prompts(
+    candidate: CandidateProfile,
+    job: JobSpec,
+    company: CompanyIntel,
+    gap: GapAnalysis,
+    language_mode: LanguageMode,
+    weights: dict[str, float],
+    counts: dict[str, int],
+    hint: str = "",
+) -> tuple[str, str]:
+    """System/user prompts for the GENERAL round: intro + technical + wrap
+    questions, JD-weighted across the given competency allocation, anchored
+    by one deep signature/case question with a branching follow-up tree.
+    """
+    allocation_lines = "\n".join(
+        f'- {n} question(s) targeting competency "{comp}"'
+        for comp, n in counts.items()
+        if n > 0
+    )
     system = (
-        "You are a senior interviewer designing a structured ~15 minute mock "
-        "interview. Produce a question plan that:\n"
-        "- Orders sections across intro, behavioral, technical, coding, and wrap.\n"
-        "- Follows a RISING difficulty curve scored 1-5 (start easy, ramp up).\n"
-        "- Gives every question a target_competency drawn from the gap analysis "
-        "(prioritise probe_targets and missing_skills).\n"
-        "- Attaches a scoring rubric of 1-3 RubricItems per question whose weights "
-        "sum to about 1.0.\n"
-        "- Seeds at least one followup probe per question.\n"
-        "- Sets time_budget_min to about 15 and language_mode as given.\n"
-        "- Tailors questions to the candidate's background and the company's "
-        "interview process and values.\n"
-        f"Write each question's text with an 'en' entry.{also_localize}{mixed_note} "
+        "You are a senior interviewer designing the GENERAL / TECHNICAL round "
+        "of a mock interview (sections: intro, technical, wrap). Write ONE "
+        "intro warm-up question, then the technical questions below, then ONE "
+        "closing/wrap question.\n\n"
+        "ALLOCATION (fixed — do not deviate from these counts):\n"
+        f"{allocation_lines}\n\n"
+        "HARD RULES:\n"
+        "- Every technical question must be concretely tailored to THIS "
+        "candidate and THIS job/company: use real table/field/metric names, "
+        "the company's actual domain, and numbers drawn from the JD or "
+        "company intel where plausible. NEVER ask a generic textbook "
+        "definition question (e.g. 'what is a JOIN') in isolation — if a "
+        "fundamental must be tested, wrap it in a scenario using this "
+        "company's data/domain.\n"
+        "- target_competency for each technical question MUST be exactly one "
+        "of the competency keys named in the allocation above.\n"
+        "- Rising difficulty 1-5 across the technical section.\n"
+        "- rubric: 2-4 RubricItems, weights summing to ~1.0. Each criterion's "
+        "description must state (a) the concept(s) a strong answer names "
+        "concretely, (b) one strong-hire signal (a specific phrase/behavior), "
+        "and (c) one red flag (a specific weak/wrong answer pattern) — like a "
+        "real interviewer's notes, not a rubric template.\n"
+        "- followups: exactly one entry per ordinary technical question (a "
+        "concrete probe, not 'can you elaborate').\n"
+        "- SIGNATURE QUESTION: make the LAST technical question a deeper, "
+        "multi-part end-to-end case/system question anchored in this "
+        "company's actual product/domain — the single hardest, most "
+        "discriminating question in the interview. Give it followups as an "
+        "ORDERED ADAPTIVE FOLLOW-UP TREE: 4-8 entries, each a natural next "
+        "probe building on the previous, covering distinct sub-topics rather "
+        "than repeating the same angle.\n"
+        "- LENIENCY: topics flagged NICE-TO-HAVE below should be probed "
+        "supportively (framed as 'how would you approach/learn X'), not used "
+        "as a hard rejection axis; topics flagged MUST-HAVE should be probed "
+        "rigorously.\n"
+        f"Write each question's text with an 'en' entry.{_localize_note(language_mode)} "
         "Respond ONLY with the requested schema."
     )
     user = (
-        f"TARGET ROLE: {job.title} ({job.seniority}) at {company.name}\n"
-        f"PRIMARY LANGUAGE: {primary} ({primary_name}); mixed={language_mode.mixed}\n\n"
-        "CANDIDATE:\n"
-        f"- {candidate.headline}; {candidate.years_experience}y; "
-        f"skills: {', '.join(candidate.skills)}\n\n"
-        "COMPANY INTERVIEW CONTEXT:\n"
-        f"- values: {', '.join(company.values)}\n"
-        f"- interview_process: {' -> '.join(company.interview_process)}\n"
-        f"- tech_stack: {', '.join(company.tech_stack)}\n\n"
-        "GAP ANALYSIS:\n"
-        f"- strengths: {', '.join(gap.strengths)}\n"
-        f"- gaps: {', '.join(gap.gaps)}\n"
+        f"ROLE: {job.title} ({job.seniority}) at {company.name}\n"
+        f"MUST-HAVE (probe rigorously): {', '.join(job.must_have)}\n"
+        f"NICE-TO-HAVE (probe leniently): {', '.join(job.nice_to_have)}\n"
+        f"RESPONSIBILITIES: {'; '.join(job.responsibilities)}\n"
+        f"TECH STACK: {', '.join(job.tech_stack)}\n\n"
+        f"COMPANY: {company.summary}\n"
+        f"COMPANY VALUES/PROCESS: {', '.join(company.values)}; "
+        f"{' -> '.join(company.interview_process)}\n\n"
+        f"CANDIDATE: {candidate.headline}; {candidate.years_experience}y; "
+        f"skills: {', '.join(candidate.skills)}; "
+        f"achievements: {'; '.join(candidate.achievements)}\n\n"
+        "GAP TO PROBE:\n"
         f"- probe_targets: {', '.join(gap.probe_targets)}\n"
-        f"- missing_skills: {', '.join(gap.missing_skills)}\n\n"
-        "Design the plan now."
+        f"- missing_skills: {', '.join(gap.missing_skills)}\n"
+        f"- matched_skills (confirm briefly, don't over-index): {', '.join(gap.matched_skills)}\n\n"
+        + (f"PLAYBOOK REFERENCE:\n{hint}\n\n" if hint else "")
+        + "Design the intro + technical + wrap questions now."
+    )
+    return system, user
+
+
+def coding_round_prompts(
+    candidate: CandidateProfile,
+    job: JobSpec,
+    gap: GapAnalysis,
+    language_mode: LanguageMode,
+    topic: str,
+    topic_meta: dict,
+    difficulty: int,
+    hint: str = "",
+) -> tuple[str, str]:
+    """System/user prompts for the CODING round: exactly one spoken,
+    think-aloud problem grounded in a deterministically-selected topic +
+    difficulty (see ``role_packs.select_coding_topic``).
+    """
+    system = (
+        "You are a senior interviewer designing the CODING round: exactly ONE "
+        "spoken, think-aloud problem. There is NO code editor — the candidate "
+        "talks through their reasoning out loud, like a phone screen, not a "
+        "leetcode session.\n\n"
+        f"- Ground the problem in the '{topic}' topic ({topic_meta['description']}), "
+        f"using the candidate's ACTUAL stack ({', '.join(job.tech_stack)}) — never "
+        "a generic algorithms-textbook prompt disconnected from the JD.\n"
+        f"- Target difficulty {difficulty}/5 for a {job.seniority}-level candidate "
+        "at this scope. Favor reasoning and trade-off talk over memorized syntax "
+        "or DSA trivia — this is not a whiteboard-coding round.\n"
+        "- rubric: 2-3 RubricItems whose descriptions state the reasoning steps "
+        "expected OUT LOUD (e.g. 'names the failure mode before proposing a "
+        "fix'), a strong-hire signal, and a red flag (e.g. 'jumps straight to "
+        "\"add more servers\"/\"use Redis, it's faster\" without diagnosing "
+        "first') — NOT a 'correct syntax' criterion, since there is no editor.\n"
+        "- followups: write EXACTLY ONE entry — the single hint to give if the "
+        "candidate stalls. Must be a nudge toward the next reasoning step, "
+        "never the answer itself. The live interviewer uses this verbatim "
+        "instead of improvising.\n"
+        f"Write the question's text with an 'en' entry.{_localize_note(language_mode)} "
+        "Respond ONLY with the requested schema (a single question)."
+    )
+    user = (
+        f"ROLE: {job.title} ({job.seniority})\n"
+        f"TECH STACK: {', '.join(job.tech_stack)}\n"
+        f"CANDIDATE SKILLS: {', '.join(candidate.skills)}\n"
+        f"RELEVANT GAP TO PROBE (if applicable to this topic): {', '.join(gap.probe_targets)}\n"
+        f"FALLBACK HINT STYLE (for tone/specificity only, write your own): {topic_meta['hint']}"
+        + (f"\n\nPLAYBOOK REFERENCE:\n{hint}" if hint else "")
+    )
+    return system, user
+
+
+def behavioral_round_prompts(
+    candidate: CandidateProfile,
+    job: JobSpec,
+    gap: GapAnalysis,
+    language_mode: LanguageMode,
+    count: int,
+    hint: str = "",
+) -> tuple[str, str]:
+    """System/user prompts for the BEHAVIORAL round: ``count`` STAR-style
+    questions, each grounded in a specific CV achievement/project, each with
+    a pre-written individual-contribution follow-up in ``followups[0]``.
+    """
+    system = (
+        f"You are a senior interviewer designing the BEHAVIORAL round: {count} "
+        "STAR-style question(s), one story at a time ('Tell me about a time "
+        "you...'), each GROUNDED IN A SPECIFIC achievement or project from the "
+        "candidate's CV below — never a generic story prompt untethered from "
+        "anything they actually did.\n\n"
+        "- Prefer target_competency values about judgment, ownership, "
+        "collaboration, or leadership (from gap.gaps / gap.probe_targets) "
+        "rather than raw technical skill — that belongs in the other rounds.\n"
+        "- followups: write EXACTLY ONE entry per question — a probe for the "
+        "candidate's OWN specific decision or action, phrased to pull the 'I' "
+        "out of the 'we' (e.g. 'What did YOU specifically decide/say/do here "
+        "— not what the team decided?'). The live interviewer asks this "
+        "verbatim as its one follow-up.\n"
+        "- rubric: 2-3 RubricItems; descriptions should reward concreteness of "
+        "the candidate's individual contribution (names their own specific "
+        "decision, can explain the reasoning) and flag the red flag of "
+        "team-outcome attribution without a personal contribution.\n"
+        f"Write each question's text with an 'en' entry.{_localize_note(language_mode)} "
+        "Respond ONLY with the requested schema."
+    )
+    projects = "; ".join(f"{p.name} — {p.description}" for p in candidate.projects)
+    user = (
+        f"ROLE: {job.title} ({job.seniority}) at {job.company_name}\n"
+        f"CANDIDATE: {candidate.headline}\n"
+        f"ACHIEVEMENTS: {'; '.join(candidate.achievements)}\n"
+        f"PROJECTS: {projects}\n\n"
+        f"BEHAVIORAL GAPS TO PROBE:\n- gaps: {', '.join(gap.gaps)}\n"
+        f"- probe_targets: {', '.join(gap.probe_targets)}"
+        + (f"\n\nPLAYBOOK REFERENCE:\n{hint}" if hint else "")
     )
     return system, user
 

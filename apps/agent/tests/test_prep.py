@@ -11,8 +11,18 @@ from __future__ import annotations
 import asyncio
 
 from proven_hire_agent.core.deps import build_deps
-from proven_hire_agent.prep import run_prep
-from proven_hire_agent.shared_models import InterviewContext, LanguageMode, PrepRequest
+from proven_hire_agent.prep import nodes, role_packs, run_prep
+from proven_hire_agent.shared_models import (
+    CandidateProfile,
+    CompanyIntel,
+    GapAnalysis,
+    InterviewContext,
+    JobSpec,
+    LanguageMode,
+    PlannedQuestion,
+    PrepRequest,
+    RubricItem,
+)
 
 
 def _request(primary: str = "en", mixed: bool = False) -> PrepRequest:
@@ -51,6 +61,38 @@ def test_run_prep_produces_ready_interview_context() -> None:
         assert q.followups, "each question needs >= 1 seeded followup"
         assert q.target_competency, "each question needs a target_competency"
         assert q.rubric, "each question needs >= 1 rubric item"
+
+    # Round-separated question generation (docs/QUESTION_GENERATION_SPEC.md):
+    # the ~40-45 min tier's fixed time budget.
+    assert ctx.plan.time_budget_min == 40
+
+    # Question ids stay unique across the three rounds even under MockLLM
+    # (which answers every round identically) thanks to the per-round re-id.
+    ids = [q.id for q in ctx.plan.questions]
+    assert len(ids) == len(set(ids)), f"duplicate question ids: {ids}"
+
+    # The coding round's difficulty/topic is deterministically pinned from
+    # role family + tech stack + inferred seniority, independent of what
+    # MockLLM (which ignores prompt content entirely) actually returned.
+    coding_questions = [q for q in ctx.plan.questions if q.section == "coding"]
+    assert len(coding_questions) == 1, "expected exactly one coding-round question"
+    family = role_packs.infer_role_family(ctx.job)
+    seniority = role_packs.infer_seniority(ctx.candidate)
+    expected_topic, expected_difficulty = role_packs.select_coding_topic(
+        family, ctx.job.tech_stack, seniority
+    )
+    assert coding_questions[0].target_competency == expected_topic
+    assert coding_questions[0].difficulty == expected_difficulty
+    assert len(coding_questions[0].followups) == 1
+
+    # Every behavioral question carries exactly one pinned individual-
+    # contribution follow-up (the safety net fires even under MockLLM, whose
+    # PlannedQuestion mock returns an empty followups list unless backfilled).
+    behavioral_questions = [q for q in ctx.plan.questions if q.section == "behavioral"]
+    assert behavioral_questions, "expected at least one behavioral question"
+    for q in behavioral_questions:
+        assert len(q.followups) == 1
+        assert q.followups[0]
 
     # Session status was flipped to ready (MemoryRepository inspection helper).
     assert deps.repo.get_status(session_id) == "ready"
@@ -128,3 +170,93 @@ def test_run_prep_ingest_failure_does_not_break_prep(monkeypatch) -> None:
     monkeypatch.setattr(deps, "knowledge", _BoomKnowledge())
     session_id = asyncio.run(run_prep(_request(), deps))
     assert deps.repo.get_status(session_id) == "ready"
+
+
+# --- round-node follow-up safety net (docs/QUESTION_GENERATION_SPEC.md) ------
+
+
+class _EmptyFollowupsLLM:
+    """Stub LLM: always answers with one PlannedQuestion that has an EMPTY
+    followups list, to prove the round nodes backfill a canned fallback
+    (the coding hint / behavioral individual-contribution probe) rather than
+    ever emitting a question with no follow-up at all."""
+
+    async def complete_text(self, *, system: str, user: str) -> str:
+        return ""
+
+    async def complete_json(self, *, system: str, user: str, schema):
+        question = PlannedQuestion(
+            id="raw",
+            section="coding",
+            text={"en": "placeholder question"},
+            difficulty=3,
+            rubric=[RubricItem(criterion="c", weight=1.0, description="d")],
+            followups=[],
+            target_competency="placeholder",
+        )
+        return schema(questions=[question])
+
+
+def _minimal_prep_state() -> dict:
+    candidate = CandidateProfile(
+        name="Test Candidate",
+        headline="Backend Engineer",
+        summary_120w="",
+        years_experience=5,
+        seniority="senior",
+        skills=["Go", "PostgreSQL"],
+        projects=[],
+        achievements=[],
+        education=[],
+        spoken_languages=["English"],
+    )
+    job = JobSpec(
+        title="Backend Engineer",
+        company_name="Acme",
+        seniority="senior",
+        must_have=["Go"],
+        nice_to_have=[],
+        responsibilities=[],
+        tech_stack=["Go", "PostgreSQL"],
+        raw_text="",
+    )
+    company = CompanyIntel(
+        name="Acme",
+        summary="",
+        tech_stack=[],
+        values=[],
+        interview_process=[],
+        recent_news=[],
+        citations=[],
+    )
+    gap = GapAnalysis(
+        strengths=[], gaps=[], probe_targets=[], matched_skills=[], missing_skills=[], summary=""
+    )
+    return {"req": _request(), "candidate": candidate, "job": job, "company": company, "gap": gap}
+
+
+def test_coding_round_backfills_hint_when_llm_returns_empty_followups(monkeypatch) -> None:
+    deps = build_deps()
+    monkeypatch.setattr(deps, "llm", _EmptyFollowupsLLM())
+    state = _minimal_prep_state()
+
+    result = asyncio.run(nodes.coding_round(state, deps))
+    questions = result["coding_questions"]
+
+    assert len(questions) == 1
+    assert len(questions[0].followups) == 1
+    assert questions[0].followups[0]  # backfilled from the topic taxonomy, never empty
+
+
+def test_behavioral_round_backfills_probe_when_llm_returns_empty_followups(monkeypatch) -> None:
+    deps = build_deps()
+    monkeypatch.setattr(deps, "llm", _EmptyFollowupsLLM())
+    state = _minimal_prep_state()
+
+    result = asyncio.run(nodes.behavioral_round(state, deps))
+    questions = result["behavioral_questions"]
+
+    assert questions
+    for q in questions:
+        assert len(q.followups) == 1
+        assert q.followups[0] == nodes._BEHAVIORAL_FALLBACK_PROBE

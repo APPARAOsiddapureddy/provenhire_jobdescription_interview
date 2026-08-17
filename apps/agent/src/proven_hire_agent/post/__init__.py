@@ -225,7 +225,7 @@ async def _run_score_locked(req: ScoreRequest, deps: Deps) -> ScoreCard:
         return _missing_context_scorecard(req.session_id)
 
     # An answer only counts if it carries a non-empty transcript: the live
-    # save_answer tool can record empty or unmatched answers that would pass a
+    # submit_answer tool can record empty or unmatched answers that would pass a
     # bare list-truthiness check yet be unscorable (-> blank "complete" card).
     if not any((a.transcript or "").strip() for a in ctx.answers):
         # A context exists but no answers were captured (interview ended before

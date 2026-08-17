@@ -9,3 +9,9 @@
 .env
 .env.*
 !.env.example
+
+# Kept out of git for the same reasons (see .gitignore) — no reason for
+# them to bloat the web app's Docker build context either.
+site/
+CLAUDE.md
+.tools/

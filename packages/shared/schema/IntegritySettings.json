@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "ai_behavior_analysis": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "camera_required": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "copy_paste_detection": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "devtools_detection": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "fullscreen_required": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "microphone_monitoring": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "camera_ai_detection": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "three_strike_auto_end": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "screen_recording_enabled": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "tab_switching_detection": {
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
+    "updated_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "ai_behavior_analysis",
+    "camera_required",
+    "copy_paste_detection",
+    "devtools_detection",
+    "fullscreen_required",
+    "microphone_monitoring",
+    "camera_ai_detection",
+    "three_strike_auto_end",
+    "screen_recording_enabled",
+    "tab_switching_detection"
+  ]
+}

@@ -1,12 +1,22 @@
 import Link from "next/link";
 import { AlertTriangle } from "lucide-react";
-import { type ScoreCard, type InterviewContext } from "@proven-hire/shared";
+import {
+  SAMPLE_INTERVIEW_CONTEXT,
+  type ScoreCard,
+  type InterviewContext,
+  type JobSpec,
+  type GapAnalysis,
+} from "@proven-hire/shared";
 import { serverEnv } from "@/lib/env";
+import { cn } from "@/lib/cn";
 import { SessionViewSchema } from "@/lib/session";
 import { SAMPLE_SCORECARD, SAMPLE_INTERVIEW } from "@/lib/sample-scorecard";
-import { Eyebrow } from "@/components/ui/eyebrow";
 import { Badge } from "@/components/ui/badge";
 import { buttonClasses } from "@/components/ui/button";
+import { PHLogo, PHVerdictBadge } from "@/components/design-system";
+// Server component: scoreToVerdict must come from the plain (non-"use
+// client") module — see lib/verdict.ts's docstring.
+import { scoreToVerdict } from "@/lib/verdict";
 import {
   Card,
   CardContent,
@@ -174,14 +184,117 @@ function buildTranscript(loaded: Loaded): {
 /** Shared page chrome for the non-report (status) states. */
 function StatusShell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="mx-auto max-w-[920px] px-6 py-12">
+    <main
+      data-ph-theme="light-report"
+      className="ph-shell mx-auto min-h-screen max-w-[920px] px-6 py-12"
+    >
       <header className="flex items-center justify-between">
         <Link href="/" className="no-underline">
-          <Eyebrow>Proven Hire Job Description Interview</Eyebrow>
+          <PHLogo compact />
         </Link>
       </header>
       <div className="mt-16 flex justify-center">{children}</div>
     </main>
+  );
+}
+
+/**
+ * Role fit — a real JD-requirement-fit mapping, not fabricated: each of the
+ * job's `must_have` requirements is cross-referenced against the prep
+ * pipeline's own gap analysis (`matched_skills` / `missing_skills`), and
+ * `responsibilities` is the JD's own list. When there's no real context
+ * (sample/offline preview), the shared sample interview context fills the
+ * same shape.
+ */
+function RoleFitSection({
+  job,
+  gap,
+}: {
+  job: JobSpec;
+  gap: GapAnalysis;
+}) {
+  // Filter out empty/whitespace entries before building the lookup sets:
+  // `"".includes(x)` and `x.includes("")` are BOTH always true in JS, so an
+  // empty string surviving into `matched`/`missing` would make every single
+  // requirement below false-positive as a match via the substring fallback.
+  const nonEmpty = (s: string) => s.trim().length > 1;
+  const matched = new Set(
+    gap.matched_skills.filter(nonEmpty).map((s) => s.toLowerCase()),
+  );
+  const missing = new Set(
+    gap.missing_skills.filter(nonEmpty).map((s) => s.toLowerCase()),
+  );
+
+  function fitFor(requirement: string): "matched" | "missing" | "unclear" {
+    const key = requirement.toLowerCase();
+    if (matched.has(key)) return "matched";
+    if (missing.has(key)) return "missing";
+    // Loose contains-match fallback — matched/missing skill phrasing doesn't
+    // always exactly equal the JD's requirement phrasing.
+    for (const m of matched) {
+      if (key.includes(m) || m.includes(key)) return "matched";
+    }
+    for (const m of missing) {
+      if (key.includes(m) || m.includes(key)) return "missing";
+    }
+    return "unclear";
+  }
+
+  return (
+    <section id="role-fit" className="mt-4 grid gap-4 lg:grid-cols-5">
+      <Card className="lg:col-span-3">
+        <CardHeader>
+          <CardTitle>Role fit</CardTitle>
+          <CardDescription>
+            Each must-have requirement, checked against evidence found in the
+            interview.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="pb-6">
+          <ul className="divide-y divide-line">
+            {job.must_have.map((req) => {
+              const fit = fitFor(req);
+              return (
+                <li
+                  key={req}
+                  className="flex items-start gap-3 py-2.5 text-[13.5px]"
+                >
+                  <span
+                    className={cn(
+                      "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold",
+                      fit === "matched" &&
+                        "bg-[color-mix(in_oklch,var(--ph-tone-elite)_16%,transparent)] text-[var(--ph-tone-elite)]",
+                      fit === "missing" &&
+                        "bg-[color-mix(in_oklch,var(--ph-tone-risk)_16%,transparent)] text-[var(--ph-tone-risk)]",
+                      fit === "unclear" && "bg-panel text-faint",
+                    )}
+                  >
+                    {fit === "matched" ? "✓" : fit === "missing" ? "✕" : "–"}
+                  </span>
+                  <span className="text-ink-soft">{req}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </CardContent>
+      </Card>
+
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <CardTitle>Responsibilities</CardTitle>
+          <CardDescription>Straight from the job description.</CardDescription>
+        </CardHeader>
+        <CardContent className="pb-6">
+          <ul className="space-y-2">
+            {job.responsibilities.slice(0, 6).map((r) => (
+              <li key={r} className="text-[13px] leading-relaxed text-muted">
+                {r}
+              </li>
+            ))}
+          </ul>
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 
@@ -294,13 +407,29 @@ export default async function ReportPage({
   // ready | sample → the full report.
   const { scorecard } = loaded;
   const { questionText, turns } = buildTranscript(loaded);
+  const job = loaded.context?.job ?? SAMPLE_INTERVIEW_CONTEXT.job;
+  const gap = loaded.context?.gap ?? SAMPLE_INTERVIEW_CONTEXT.gap;
+  // ScoreCard's `overall_score` is on a 0-5 scale; scoreToVerdict expects a
+  // 0-1 fraction.
+  const verdict = scoreToVerdict(scorecard.overall_score / 5, scorecard.coverage_pct);
+
+  const TABS = [
+    { id: "decision", label: "Decision" },
+    { id: "role-fit", label: "Role fit" },
+    { id: "evidence", label: "Evidence" },
+    { id: "risks", label: "Risks" },
+    { id: "next", label: "Next" },
+  ] as const;
 
   return (
-    <main className="mx-auto max-w-[920px] px-6 py-12">
+    <main
+      data-ph-theme="light-report"
+      className="ph-shell mx-auto min-h-screen max-w-[920px] px-6 py-12"
+    >
       {/* Header */}
       <header className="flex items-center justify-between">
         <Link href="/" className="no-underline">
-          <Eyebrow>Proven Hire Job Description Interview</Eyebrow>
+          <PHLogo compact />
         </Link>
         {loaded.state === "sample" && (
           <Badge variant="outline">Preview (sample data)</Badge>
@@ -308,7 +437,12 @@ export default async function ReportPage({
       </header>
 
       <div className="mt-6">
-        <h1 className="font-serif text-4xl text-ink">Your interview report</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <PHVerdictBadge verdict={verdict} />
+          <h1 className="text-4xl font-semibold tracking-[-0.03em] text-ink">
+            Your interview report
+          </h1>
+        </div>
         <p className="mt-2 max-w-2xl text-[15px] leading-relaxed text-muted">
           {loaded.role && loaded.company ? (
             <>
@@ -317,7 +451,24 @@ export default async function ReportPage({
           ) : null}
           {scorecard.summary}
         </p>
+
+        {/* Section nav — lightweight anchor "tabs", not a full SPA tab
+            switch: every section below still renders, this just gives a
+            quick jump-to per the decision/role-fit/evidence/risks/next
+            structure. */}
+        <nav className="mt-5 flex flex-wrap gap-2" aria-label="Report sections">
+          {TABS.map((tab) => (
+            <a
+              key={tab.id}
+              href={`#${tab.id}`}
+              className="rounded-lg border border-line px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-muted transition-colors hover:border-ink hover:text-ink"
+            >
+              {tab.label}
+            </a>
+          ))}
+        </nav>
       </div>
+
 
       {/* Partial (degraded) card: the agent persisted it without the full
           narrative — show what's there, with an honest notice. */}
@@ -336,12 +487,14 @@ export default async function ReportPage({
       )}
 
       {/* Bento: hero + top metrics */}
-      <section className="mt-8">
+      <section id="decision" className="mt-8">
         <ScoreBento scorecard={scorecard} />
       </section>
 
+      <RoleFitSection job={job} gap={gap} />
+
       {/* Competency radar + strengths/gaps */}
-      <section className="mt-4 grid gap-4 lg:grid-cols-5">
+      <section id="risks" className="mt-4 grid gap-4 lg:grid-cols-5">
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle>Competencies</CardTitle>
@@ -358,7 +511,7 @@ export default async function ReportPage({
       </section>
 
       {/* Language report + next steps */}
-      <section className="mt-4 grid gap-4 md:grid-cols-2">
+      <section id="next" className="mt-4 grid gap-4 md:grid-cols-2">
         <LanguageReportCard report={scorecard.language_report} />
         <Card>
           <CardHeader>
@@ -386,7 +539,7 @@ export default async function ReportPage({
       </section>
 
       {/* Stronger answers */}
-      <section className="mt-4">
+      <section id="evidence" className="mt-4">
         <ModelAnswers
           answers={scorecard.model_answers}
           questionText={questionText}

@@ -44,3 +44,11 @@ supabase/.temp/
 # Avatar media is never committed (docs/AVATARS.md): local-dev drop-in only;
 # accepted packs are published as GitHub Release artifacts + CDN.
 apps/web/public/avatars/
+
+# Portable local tooling (Node runtime, LiveKit CLI, cloudflared) — large
+# vendored binaries fetched per-machine, never committed.
+.tools/
+
+# Claude Code local machine state (permission allowlist, scheduler lock) —
+# personal, not project source.
+.claude/

@@ -33,9 +33,9 @@ import { useRouter } from "next/navigation";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
-  StartAudio,
   useConnectionState,
   useLocalParticipant,
+  useStartAudio,
   useTranscriptions,
 } from "@livekit/components-react";
 import {
@@ -47,6 +47,9 @@ import "@livekit/components-styles";
 
 import type { Persona } from "@/lib/personas";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import { useMessages } from "@/lib/i18n/client";
+import { useIntegrityMonitor, useScreenRecording } from "@/lib/integrity";
 import { VoiceStage, StagePreview } from "@/components/interview/voice-stage";
 import {
   TranscriptPanel,
@@ -84,6 +87,8 @@ export interface LiveRoomProps {
   /** Null when LiveKit is unconfigured → preview (not-connected) mode. */
   token: string | null;
   url: string | null;
+  /** Screen recording needs R2 to store the recording — computed server-side. */
+  r2Configured: boolean;
 }
 
 /**
@@ -131,6 +136,61 @@ function ErrorNotice({
         {message}
       </p>
       {action ? <div className="mt-3 flex justify-center">{action}</div> : null}
+    </div>
+  );
+}
+
+/**
+ * Full-screen, impossible-to-miss modal prompt — a click-to-continue gate
+ * for anything that needs a fresh user gesture to unblock (browser autoplay
+ * policy, entering fullscreen; both require a real click, not a programmatic
+ * call). Generalized from the audio-unlock overlay below so Integrity
+ * Controls' "Fullscreen Required" can reuse the identical template instead
+ * of duplicating it.
+ *
+ * THE BUG the audio case originally fixed: the previous UI used LiveKit's
+ * <StartAudio>, a small text button sitting quietly among the other
+ * controls. When a browser blocked autoplay, a candidate had no audio cue
+ * that anything was wrong — the transcript kept filling in with the
+ * interviewer's questions (proving "the AI is working"), but nothing was
+ * ever heard, and no visual signal pointed at the one small button that
+ * would fix it. A full-screen blocking overlay makes the fix impossible to
+ * miss — the same reasoning applies to any other gesture-gated requirement.
+ */
+function BlockingPrompt({
+  titleId,
+  title,
+  message,
+  buttonLabel,
+  onContinue,
+}: {
+  titleId: string;
+  title: string;
+  message: string;
+  buttonLabel: string;
+  onContinue: () => void;
+}) {
+  return (
+    <div
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm"
+    >
+      <div className="mx-4 flex max-w-sm flex-col items-center gap-4 rounded-card border border-line bg-paper px-8 py-8 text-center shadow-xl">
+        <p id={titleId} className="font-serif text-[19px] text-ink">
+          {title}
+        </p>
+        <p className="text-[13px] leading-relaxed text-ink-soft">{message}</p>
+        <button
+          type="button"
+          onClick={onContinue}
+          autoFocus
+          className="mt-1 rounded-full bg-ink px-6 py-3 text-[14px] font-medium text-white transition-colors hover:bg-ink-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+        >
+          {buttonLabel}
+        </button>
+      </div>
     </div>
   );
 }
@@ -197,6 +257,12 @@ function Scaffold({
           {controls}
           <div className="w-full max-w-xl">{textFallback}</div>
         </div>
+
+        {/* Always shown, independent of Integrity Controls settings — see
+            IntegrityForm's footer note ("maintains recruiter trust"). */}
+        <p className="mt-4 text-center text-[11px] text-faint">
+          {t(useMessages(), "common.integrityTrustLine")}
+        </p>
       </div>
     </main>
   );
@@ -211,12 +277,14 @@ function LiveSession({
   sessionId,
   micError,
   onMicError,
+  r2Configured,
 }: {
   persona: Persona;
   sessionId: string;
   /** Mic-failure banner text — owned by <LiveRoom>, which also catches room-level capture failures. */
   micError: string | null;
   onMicError: (message: string | null) => void;
+  r2Configured: boolean;
 }) {
   const router = useRouter();
   const connectionState = useConnectionState();
@@ -227,8 +295,12 @@ function LiveSession({
 
   const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
   const transcriptions = useTranscriptions();
+  const { mergedProps: startAudioProps, canPlayAudio } = useStartAudio({
+    props: {},
+  });
 
   const [ending, setEnding] = React.useState(false);
+  const endingRef = React.useRef(false);
 
   // A publishing mic proves capture works again — clear any stale failure banner.
   React.useEffect(() => {
@@ -291,15 +363,75 @@ function LiveSession({
   }
 
   async function endInterview() {
+    // Re-entrancy guard: a ref (not the `ending` state, which updates
+    // asynchronously) so two guard hooks hitting their 3rd strike in the
+    // same tick — or a strike landing right as the End button is clicked —
+    // can't both fall through and double-run the leave sequence.
+    if (endingRef.current) return;
+    endingRef.current = true;
     setEnding(true);
     try {
       await localParticipant.setMicrophoneEnabled(false);
     } catch {
       // best-effort; proceed to leave regardless
     }
+    // Best-effort, bounded: give the screen recording (if any) a chance to
+    // upload before navigating away, but never let a slow upload strand the
+    // candidate on this screen — this app never blocks on a background task
+    // indefinitely (same philosophy as every other integrity check here).
+    await Promise.race([
+      stopAndUpload(),
+      new Promise((resolve) => setTimeout(resolve, 8000)),
+    ]);
     // The room disconnect happens as <LiveKitRoom> unmounts on navigation.
     router.push(`/report/${encodeURIComponent(sessionId)}`);
   }
+
+  // useIntegrityMonitor needs a STABLE onAutoEnd identity. `endInterview`
+  // itself is a fresh function every render (it closes over per-render
+  // state/props), so it's stashed in a ref and read through a callback whose
+  // identity never changes. Without this, a new `() => void endInterview()`
+  // closure each render churned reportViolation's identity inside
+  // useIntegrityMonitor, which is a dependency of EVERY guard hook
+  // (fullscreen/tab/devtools/copy-paste/mic-noise/camera) — tearing all six
+  // down and rebuilding them on every re-render (e.g. every transcript
+  // segment). Concretely this meant the camera-AI hook could restart its
+  // MediaPipe/TensorFlow model load before it ever finished, and the
+  // mic-noise guard's consecutive-loud-frame counter reset before it could
+  // ever reach its threshold — both detectors effectively never firing.
+  const endInterviewRef = React.useRef<() => void>(() => {});
+  endInterviewRef.current = () => void endInterview();
+  const onAutoEnd = React.useCallback(() => endInterviewRef.current(), []);
+
+  // Integrity Controls: fetches settings once, wires the browser-signal
+  // guards (fullscreen/tab-switch/devtools/copy-paste/mic-noise), and calls
+  // endInterview() itself once a rule class hits 3 strikes AND "3-strike
+  // auto-end" is STRICT — same auto-end path the End button uses.
+  const {
+    settings: integritySettings,
+    banner,
+    needsFullscreen,
+    requestFullscreen,
+    cameraStatus,
+  } = useIntegrityMonitor(onAutoEnd);
+  const cameraRequired = integritySettings?.camera_required !== "off";
+  const cameraUnavailable =
+    cameraRequired &&
+    (cameraStatus === "denied" || cameraStatus === "unsupported");
+
+  // Screen recording is independent of the "AI Behavior Analysis" master
+  // switch (it's plain capture, not a detector) and only ever activates
+  // when R2 is actually configured — there's nowhere else a recording this
+  // large could reasonably go (unlike a CV, there's no small-file fallback).
+  const {
+    needsConsent: needsRecordingConsent,
+    grantConsent: grantRecordingConsent,
+    stopAndUpload,
+  } = useScreenRecording(
+    integritySettings?.screen_recording_enabled,
+    sessionId,
+    r2Configured,
+  );
 
   function sendText(text: string) {
     // Optimistic local echo — the agent does not stream typed input back.
@@ -319,45 +451,89 @@ function LiveSession({
   }
 
   return (
-    <Scaffold
-      persona={persona}
-      stage={<VoiceStage persona={persona} />}
-      transcript={<TranscriptPanel turns={turns} live className="h-full" />}
-      timer={<SessionTimer running={connected} />}
-      controls={
-        <div className="flex flex-col items-center gap-3">
-          {/* Visible only when the browser blocks autoplay — StartAudio toggles
-              its own `display`, so a sighted user can click to enable audio. */}
-          <StartAudio
-            label="Enable interview audio"
-            className="rounded-full border border-accent bg-accent-soft px-4 py-2 text-[13px] font-medium text-accent transition-colors hover:bg-accent hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-          />
+    <>
+      {/* Blocking overlay — not a small button candidates can miss. Shown the
+          moment the browser has refused autoplay; disappears the instant the
+          click registers (canPlayAudio flips true), no reload needed. */}
+      {/* At most one blocking prompt renders at a time. All three share the
+          same `fixed inset-0 z-50` stacking context, so if more than one of
+          these were ever true simultaneously (very plausible at session
+          start: audio unlock, fullscreen, and recording consent can all be
+          pending together), rendering them as independent siblings left
+          whichever mounted first hidden underneath the latest one — the
+          candidate stuck behind an invisible gate with no visible way
+          forward. Chaining them into one priority order guarantees exactly
+          one is ever shown, and each is re-checked every render, so the next
+          one (if still needed) takes over the instant the current one
+          resolves. Priority: hearing the interviewer first, then
+          fullscreen, then recording consent. */}
+      {!canPlayAudio ? (
+        <BlockingPrompt
+          titleId="audio-unlock-title"
+          title="Enable interview audio"
+          message="Your browser blocked the interviewer's voice from playing automatically. Click below so you can hear them — this only takes one click."
+          buttonLabel="Enable audio & continue"
+          onContinue={() => startAudioProps.onClick()}
+        />
+      ) : needsFullscreen ? (
+        <BlockingPrompt
+          titleId="fullscreen-required-title"
+          title="Fullscreen required"
+          message="This assessment requires fullscreen mode. Click below to continue."
+          buttonLabel="Enter fullscreen & continue"
+          onContinue={requestFullscreen}
+        />
+      ) : needsRecordingConsent ? (
+        <BlockingPrompt
+          titleId="recording-consent-title"
+          title="Screen recording required"
+          message="This assessment records your screen for review. Click below, then choose this tab or your full screen in the browser's share picker."
+          buttonLabel="Start screen recording"
+          onContinue={grantRecordingConsent}
+        />
+      ) : null}
+      <Scaffold
+        persona={persona}
+        stage={<VoiceStage persona={persona} />}
+        transcript={<TranscriptPanel turns={turns} live className="h-full" />}
+        timer={<SessionTimer running={connected} />}
+        controls={
           <ControlBar
             micEnabled={isMicrophoneEnabled}
             onToggleMute={() => void toggleMute()}
             onEnd={() => void endInterview()}
             ending={ending}
           />
-        </div>
-      }
-      textFallback={<TextFallback onSend={sendText} />}
-      notice={
-        micError ? (
-          <ErrorNotice
-            title="Microphone unavailable"
-            message={`${micError} Until then, you can type your answers below.`}
-          />
-        ) : reconnecting ? (
-          <div
-            role="status"
-            aria-live="polite"
-            className="mx-auto mt-6 max-w-xl rounded-card border border-line bg-paper/70 px-4 py-3 text-center text-[13px] text-muted backdrop-blur-sm"
-          >
-            Connection unstable — reconnecting…
-          </div>
-        ) : null
-      }
-    />
+        }
+        textFallback={<TextFallback onSend={sendText} />}
+        notice={
+          banner ? (
+            <ErrorNotice
+              title={banner.level === "strict" ? "Integrity warning" : "Notice"}
+              message={banner.message}
+            />
+          ) : micError ? (
+            <ErrorNotice
+              title="Microphone unavailable"
+              message={`${micError} Until then, you can type your answers below.`}
+            />
+          ) : cameraUnavailable ? (
+            <ErrorNotice
+              title="Camera required"
+              message="This assessment requires your camera. Check your browser's camera permission, then reload."
+            />
+          ) : reconnecting ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mx-auto mt-6 max-w-xl rounded-card border border-line bg-paper/70 px-4 py-3 text-center text-[13px] text-muted backdrop-blur-sm"
+            >
+              Connection unstable — reconnecting…
+            </div>
+          ) : null
+        }
+      />
+    </>
   );
 }
 
@@ -482,7 +658,13 @@ function ConnectionLostShell({
 /* Orchestrator.                                                        */
 /* ------------------------------------------------------------------ */
 
-export function LiveRoom({ sessionId, persona, token, url }: LiveRoomProps) {
+export function LiveRoom({
+  sessionId,
+  persona,
+  token,
+  url,
+  r2Configured,
+}: LiveRoomProps) {
   const router = useRouter();
 
   // Guard the browser-only LiveKit client from SSR / first hydration.
@@ -585,6 +767,7 @@ export function LiveRoom({ sessionId, persona, token, url }: LiveRoomProps) {
         sessionId={sessionId}
         micError={micError}
         onMicError={setMicError}
+        r2Configured={r2Configured}
       />
     </LiveKitRoom>
   );

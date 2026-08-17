@@ -1,0 +1,33 @@
+# Fly.io deployment for the ProvenHire agent-api service (FastAPI, :8000).
+# Builds the `api` stage of ./Dockerfile — NOT the LiveKit worker (that's
+# deployed separately to LiveKit Cloud via `lk agent deploy`).
+app = "provenhire-agent-api"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+  target = "api"
+
+[env]
+  AGENT_API_PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[checks]
+  [checks.health]
+    grace_period = "30s"
+    interval = "15s"
+    method = "GET"
+    path = "/health"
+    port = 8000
+    timeout = "5s"
+    type = "http"

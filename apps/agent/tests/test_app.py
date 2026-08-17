@@ -38,13 +38,16 @@ def test_prep_endpoint_creates_ready_session() -> None:
     payload = view.json()
     assert payload["session_id"] == session_id
     assert payload["status"] == "ready"
-    # All five prep agents reported completion (order is non-deterministic).
+    # All prep steps reported completion (order is non-deterministic).
     assert set(payload["progress"]) == {
         "cv_analysis",
         "jd_analysis",
         "company_research",
         "gap_matching",
-        "question_planner",
+        "general_round",
+        "coding_round",
+        "behavioral_round",
+        "assemble_plan",
     }
     assert payload["context"] is not None
     assert payload["context"]["session_id"] == session_id

@@ -67,8 +67,18 @@ def wire_audio_path_logging(ctx: JobContext, session) -> None:
         log.info("audio-path: track SUBSCRIBED kind=%s from %s", _kind(pub), p.identity)
 
     @ctx.room.on("track_muted")
-    def _on_muted(pub, p) -> None:
+    def _on_muted(p, pub) -> None:
+        # NOTE: track_muted emits (participant, publication) — the REVERSE order
+        # of track_published/track_subscribed's (publication, participant).
+        # Swapping the params here previously crashed this handler on every real
+        # mute (AttributeError: 'RemoteTrackPublication' has no attribute
+        # 'identity'), silently eating the log line that would show a candidate's
+        # mic actually going mute mid-interview.
         log.info("audio-path: track MUTED kind=%s by %s", _kind(pub), p.identity)
+
+    @ctx.room.on("track_unmuted")
+    def _on_unmuted(p, pub) -> None:
+        log.info("audio-path: track UNMUTED kind=%s by %s", _kind(pub), p.identity)
 
     for p in ctx.room.remote_participants.values():
         pubs = {sid: _kind(pub) for sid, pub in p.track_publications.items()}
@@ -80,8 +90,13 @@ def wire_audio_path_logging(ctx: JobContext, session) -> None:
 
     @session.on("user_input_transcribed")
     def _on_user_transcribed(ev) -> None:
-        log.info("audio-path: user transcript final=%s len=%d",
-                 getattr(ev, "is_final", "?"), len(getattr(ev, "transcript", "") or ""))
+        # Log the actual text (not just length) — without it, a garbled or
+        # empty-but-"final" STT result is indistinguishable from a good one in
+        # the logs, which is exactly the visibility gap that made a prior STT
+        # accuracy complaint undiagnosable.
+        text = getattr(ev, "transcript", "") or ""
+        log.info("audio-path: user transcript final=%s text=%r",
+                 getattr(ev, "is_final", "?"), text[:200])
 
 
 def wire_transcript_capture(
@@ -92,8 +107,8 @@ def wire_transcript_capture(
     ``conversation_item_added`` fires for both the candidate's real STT
     transcript and the agent's actually-spoken replies, so the persisted
     transcript reflects what was said — it no longer depends on the LLM
-    remembering to call ``save_answer``, and an abrupt disconnect keeps every
-    turn committed so far. Answers for scoring come from ``save_answer`` ->
+    remembering to call ``submit_answer``, and an abrupt disconnect keeps every
+    turn committed so far. Answers for scoring come from ``submit_answer`` ->
     ``ctx.answers``, with ``state.reconstruct_answers`` recovering any unsaved
     ones from this log at shutdown.
 
@@ -204,6 +219,31 @@ def _local_whisper_stt(settings, language: str, mixed: bool, vad=None):
     )
 
 
+def _with_stt_fallback(primary, settings):
+    """Wrap the primary STT in a FallbackAdapter to Soniox when a key is
+    configured — a live Deepgram outage/rate-limit no longer silently kills
+    transcription for the rest of the session; the SDK retries on Soniox.
+
+    Uses ``getattr`` (not direct attribute access) because several worker
+    tests construct ``settings`` as a bare ``SimpleNamespace`` with only the
+    fields that specific test cares about — a direct ``settings.soniox_api_key``
+    would raise ``AttributeError`` on those, not just skip the fallback.
+    No-op (returns ``primary`` unchanged) when no Soniox key is set.
+    """
+    soniox_key = getattr(settings, "soniox_api_key", None)
+    if not soniox_key:
+        return primary
+    try:
+        from livekit.agents import stt as agents_stt
+        from livekit.plugins import soniox
+
+        backup = soniox.STT(api_key=soniox_key)
+        return agents_stt.FallbackAdapter([primary, backup])
+    except Exception:  # noqa: BLE001 - resilience feature; never block on it
+        log.warning("build_stt: could not wire Soniox fallback; using primary STT only")
+        return primary
+
+
 def build_stt(settings, language="en", mixed=False, vad=None):
     lang = _stt_lang(language, mixed)
     # Local path: no key, a base URL instead. Checked before the cloud branches
@@ -218,13 +258,15 @@ def build_stt(settings, language="en", mixed=False, vad=None):
     model = "nova-3" if lang in ("en", "multi") else "nova-2"
     provider = _provider(settings, "stt")
     if provider == "deepgram" and settings.deepgram_api_key:
-        return _deepgram_stt(lang, model, api_key=settings.deepgram_api_key)
+        return _with_stt_fallback(
+            _deepgram_stt(lang, model, api_key=settings.deepgram_api_key), settings
+        )
     if provider == "soniox" and settings.soniox_api_key:
         from livekit.plugins import soniox
 
         return soniox.STT(api_key=settings.soniox_api_key)
     log.warning("build_stt: no configured STT provider/key; using Deepgram default")
-    return _deepgram_stt(lang, model)
+    return _with_stt_fallback(_deepgram_stt(lang, model), settings)
 
 
 def _require_live_providers(settings) -> None:
@@ -453,14 +495,20 @@ def build_tts(settings, language="en"):
         log.info("build_tts: %r unsupported by Cartesia; using Gemini TTS fallback", language)
         return GeminiTTS(model=settings.gemini_tts_model, api_key=settings.gemini_api_key)
 
+    # cartesia_voice_id is an English voice (Cartesia's Indian-English catalog) —
+    # only apply it for English sessions. A non-English Cartesia language (e.g.
+    # hi) keeps the plugin's own default voice for that language rather than
+    # forcing an English-accented voice ID onto it.
+    voice = settings.cartesia_voice_id if lang == "en" else None
+
     if provider == "cartesia" and settings.cartesia_api_key:
         from livekit.plugins import cartesia
 
-        return cartesia.TTS(api_key=settings.cartesia_api_key, language=lang)
+        return cartesia.TTS(api_key=settings.cartesia_api_key, language=lang, voice=voice)
     log.warning("build_tts: no configured TTS provider/key; using Cartesia default")
     from livekit.plugins import cartesia
 
-    return cartesia.TTS(language=lang)
+    return cartesia.TTS(language=lang, voice=voice)
 
 
 # Languages the LiveKit multilingual end-of-turn model can judge semantically.
@@ -675,7 +723,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # Persisted transcript = real committed turns (STT + agent speech), not
-    # whatever the LLM chose to pass to save_answer.
+    # whatever the LLM chose to pass to submit_answer.
     wire_transcript_capture(session, userdata)
     wire_audio_path_logging(ctx, session)
 
@@ -800,7 +848,7 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception:
             log.exception("worker: usage summary failed for %s", session_id)
 
-        # Recover answers the save_answer tool never committed (model forgot to
+        # Recover answers the submit_answer tool never committed (model forgot to
         # call it, or the candidate hung up mid-question) from the verbatim
         # transcript — otherwise real answers are dropped and the session lands
         # on "no_answers" with no report.

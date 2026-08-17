@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
+import { Fraunces, Geist, Geist_Mono, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({
@@ -20,6 +20,21 @@ const jetbrains = JetBrains_Mono({
   subsets: ["latin"],
   weight: ["400", "500"],
   variable: "--font-jetbrains",
+  display: "swap",
+});
+
+// ProvenHire design-system fonts (see globals.css's `--font-sans`/`--ph-mono`).
+// Inter/JetBrains stay loaded too — a handful of not-yet-migrated components
+// still reference them directly, and removing them isn't in scope here.
+const geistSans = Geist({
+  subsets: ["latin"],
+  variable: "--font-geist-sans",
+  display: "swap",
+});
+
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
   display: "swap",
 });
 
@@ -54,7 +69,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${fraunces.variable} ${jetbrains.variable}`}
+      className={`${inter.variable} ${fraunces.variable} ${jetbrains.variable} ${geistSans.variable} ${geistMono.variable}`}
     >
       <body className="font-sans">
         <noscript>

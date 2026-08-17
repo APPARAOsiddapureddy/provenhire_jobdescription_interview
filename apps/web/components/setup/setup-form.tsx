@@ -552,6 +552,12 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
       >
         {t(messages, "setup.start")}
       </Button>
+
+      {/* Always shown, independent of Integrity Controls settings — see
+          IntegrityForm's footer note ("maintains recruiter trust"). */}
+      <p className="text-[11px] text-faint">
+        {t(messages, "common.integrityTrustLine")}
+      </p>
     </form>
   );
 }

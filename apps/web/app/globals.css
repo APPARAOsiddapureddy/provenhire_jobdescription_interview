@@ -1,24 +1,80 @@
 @import "tailwindcss";
 
 @theme {
-  --color-paper: #fbfaf8;
-  --color-panel: #ffffff;
-  --color-ink: #17171a;
-  --color-ink-soft: #3a3a40;
-  --color-muted: #73737b;
-  --color-faint: #9a9aa1;
-  --color-line: #e7e3da;
-  --color-line-2: #efece5;
-  --color-accent: #4338ca;
-  --color-accent-soft: #eef0fb;
-  --color-ok: #15803d;
+  /* ─────────────────────────────────────────────────────────────────
+     ProvenHire design tokens ("ph-" prefix). This is the dark control-room
+     system shared with the sibling Antigravity Interview product — same
+     values, same names, so the two products read as one family.
+     ───────────────────────────────────────────────────────────────── */
+  --ph-bg: oklch(0.09 0.012 265);
+  --ph-bg-elevated: oklch(0.11 0.014 265);
+  --ph-surface-0: oklch(0.13 0.016 265 / 0.92);
+  --ph-surface-1: oklch(0.16 0.018 265 / 0.92);
+  --ph-surface-2: oklch(0.2 0.018 265 / 0.92);
+  --ph-border: oklch(0.28 0.018 265 / 0.72);
+  --ph-border-strong: oklch(0.4 0.04 258 / 0.42);
+  --ph-text-0: oklch(0.96 0.003 260);
+  --ph-text-1: oklch(0.84 0.01 260);
+  --ph-text-2: oklch(0.69 0.012 260);
+  --ph-text-3: oklch(0.53 0.014 260);
+  --ph-blue: oklch(0.68 0.19 255);
+  --ph-blue-soft: oklch(0.68 0.19 255 / 0.12);
+  --ph-amber: oklch(0.8 0.16 72);
+  --ph-green: oklch(0.76 0.16 155);
+  --ph-red: oklch(0.66 0.21 24);
+  --ph-shadow: 0 20px 80px oklch(0.02 0.01 260 / 0.45);
+  --ph-mono:
+    var(--font-geist-mono), "SFMono-Regular", ui-monospace, monospace;
+  --ph-phase-primary: var(--ph-blue);
+  --ph-phase-secondary: oklch(0.74 0.22 196);
+  --ph-phase-tertiary: oklch(0.72 0.24 292);
 
-  --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
+  /* Interview-room phase colors (hex, matched exactly to the state-machine
+     spec — used inline via color-mix() rather than as Tailwind utilities). */
+  --ph-phase-ready: #7aa7ff;
+  --ph-phase-asking: #ff9a3d;
+  --ph-phase-listening: #1fd5f9;
+  --ph-phase-reviewing: #ffbe59;
+  --ph-phase-closing: #6cff9e;
+
+  /* Report (light theme) tone accents — see [data-ph-theme="light-report"]. */
+  --ph-tone-elite: #059669;
+  --ph-tone-emerging: #0891b2;
+  --ph-tone-risk: #e11d48;
+  --ph-tone-mixed: #d97706;
+
+  /* ─────────────────────────────────────────────────────────────────
+     App-wide token remap: every existing component already uses these
+     semantic names (bg-paper, text-ink, border-line, bg-accent, …).
+     Repointing their VALUES at the ph- palette reskins the whole app —
+     marketing site, setup, live interview, report, integrity settings —
+     without touching a single consumer file.
+     ───────────────────────────────────────────────────────────────── */
+  --color-paper: var(--ph-bg);
+  --color-panel: var(--ph-bg-elevated);
+  --color-ink: var(--ph-text-0);
+  --color-ink-soft: var(--ph-text-1);
+  --color-muted: var(--ph-text-2);
+  --color-faint: var(--ph-text-3);
+  --color-line: var(--ph-border);
+  --color-line-2: var(--ph-border-strong);
+  --color-accent: var(--ph-blue);
+  --color-accent-soft: var(--ph-blue-soft);
+  --color-ok: var(--ph-green);
+
+  --font-sans:
+    var(--font-geist-sans), var(--font-inter), "Inter Tight", "Avenir Next",
+    "Segoe UI", sans-serif;
   --font-serif: var(--font-fraunces), Georgia, serif;
-  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+  --font-mono: var(--ph-mono);
 
-  --radius: 14px;
-  --radius-card: 14px;
+  --radius: 12px;
+  --radius-card: 16px;
+  /* The interview room shell uses noticeably larger radii than the rest of
+     the app — Tailwind v4 auto-generates `rounded-room`/`rounded-chip` from
+     any `--radius-*` key. */
+  --radius-room: 30px;
+  --radius-chip: 10px;
 }
 
 @layer base {
@@ -35,10 +91,50 @@
   }
 
   body {
+    position: relative;
     background-color: var(--color-paper);
+    background-image:
+      radial-gradient(
+        60% 42% at 50% -6%,
+        oklch(0.64 0.18 255 / 0.16),
+        transparent 60%
+      ),
+      radial-gradient(
+        46% 34% at 96% 4%,
+        oklch(0.8 0.16 72 / 0.07),
+        transparent 65%
+      ),
+      linear-gradient(
+        180deg,
+        oklch(0.1 0.014 265) 0%,
+        oklch(0.08 0.012 265) 100%
+      );
+    background-attachment: fixed;
     color: var(--color-ink);
     font-family: var(--font-sans);
     line-height: 1.6;
+  }
+
+  /* Fine dot-grid texture, faded out by 90% viewport height so it never
+     competes with content near the bottom of a long page. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image: radial-gradient(
+      oklch(0.9 0.01 260 / 0.34) 1px,
+      transparent 1px
+    );
+    background-size: 28px 28px;
+    mask-image: linear-gradient(180deg, black, transparent 90%);
+    -webkit-mask-image: linear-gradient(180deg, black, transparent 90%);
+  }
+
+  ::selection {
+    background: var(--ph-blue-soft);
+    color: var(--color-ink);
   }
 
   a {
@@ -64,7 +160,131 @@
     text-transform: uppercase;
     color: var(--color-accent);
   }
+
+  /* Mono kicker/eyebrow label used across every ProvenHire screen. */
+  .ph-kicker {
+    font-family: var(--ph-mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--ph-text-3);
+  }
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Signature reusable classes.
+   ───────────────────────────────────────────────────────────────────── */
+
+.ph-card {
+  position: relative;
+  border: 1px solid var(--ph-border);
+  background: linear-gradient(
+    180deg,
+    oklch(0.15 0.015 265 / 0.92),
+    oklch(0.12 0.014 265 / 0.94)
+  );
+  box-shadow: var(--ph-shadow);
+}
+
+.ph-shell {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Interview room's 3-column workspace grid. The right (candidate) column's
+   width needs to ANIMATE between 72px (collapsed) and its expanded track —
+   CSS can't smoothly transition `grid-template-columns` when one of the
+   tracks is read from a var() custom property (that requires @property
+   registration, which doesn't support minmax() track syntax), so this is
+   two concrete, literal grid-template-columns rules instead — browsers
+   animate directly-specified grid-template-columns changes natively. */
+.ph-room-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+@media (min-width: 1024px) {
+  .ph-room-grid {
+    grid-template-columns: minmax(260px, 310px) minmax(0, 1fr) 72px;
+    transition: grid-template-columns 300ms ease;
+  }
+  .ph-room-grid[data-history-open="true"] {
+    grid-template-columns:
+      minmax(260px, 310px) minmax(0, 1fr) minmax(250px, 310px);
+  }
+}
+
+.ph-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.28 0.014 265 / 0.9) transparent;
+}
+.ph-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.ph-scrollbar::-webkit-scrollbar-thumb {
+  background: oklch(0.28 0.014 265 / 0.9);
+  border-radius: 999px;
+}
+.ph-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Every accent color pairs its solid fill with a glow of the same hue at low
+   opacity — buttons, gauges, bars, dots, and borders all "glow-match-fill". */
+.ph-glow-blue {
+  box-shadow: 0 0 0 1px oklch(0.68 0.19 255 / 0.4), 0 0 18px oklch(0.68 0.19 255 / 0.35);
+}
+.ph-glow-amber {
+  box-shadow: 0 0 0 1px oklch(0.8 0.16 72 / 0.4), 0 0 18px oklch(0.8 0.16 72 / 0.35);
+}
+.ph-glow-green {
+  box-shadow: 0 0 0 1px oklch(0.76 0.16 155 / 0.4), 0 0 18px oklch(0.76 0.16 155 / 0.35);
+}
+.ph-glow-red {
+  box-shadow: 0 0 0 1px oklch(0.66 0.21 24 / 0.4), 0 0 18px oklch(0.66 0.21 24 / 0.35);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Report / verdict screens — a SEPARATE light theme, deliberately in
+   contrast with the dark control-room UI everywhere else. Overriding the
+   same semantic --color-* variables inside this scope means every existing
+   report child component (already built against bg-panel/text-ink/etc.)
+   renders correctly in light mode with no changes to those files.
+   ───────────────────────────────────────────────────────────────────── */
+[data-ph-theme="light-report"] {
+  --color-paper: #f6faf9;
+  --color-panel: #ffffff;
+  --color-ink: #0b1220; /* ~slate-950 */
+  --color-ink-soft: #1e293b; /* slate-800 */
+  --color-muted: #475569; /* slate-600 */
+  --color-faint: #94a3b8; /* slate-400 */
+  --color-line: #e2e8f0; /* slate-200 */
+  --color-line-2: #cbd5e1; /* slate-300 */
+  --color-accent: #0891b2;
+  --color-accent-soft: #ecfeff;
+  --color-ok: #059669;
+
+  background: linear-gradient(180deg, #f6faf9 0%, #eef4f6 45%, #fbfbfb 100%);
+  color: var(--color-ink);
+  min-height: 100vh;
+}
+[data-ph-theme="light-report"] .ph-card,
+[data-ph-theme="light-report"] .bg-panel {
+  background: #ffffff;
+  border-color: var(--color-line);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+[data-ph-theme="light-report"] body::before {
+  display: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Motion system. Every animation below respects prefers-reduced-motion
+   (see the block at the bottom of this file).
+   ───────────────────────────────────────────────────────────────────── */
 
 @keyframes dpulse {
   0%,
@@ -85,7 +305,6 @@
     opacity: 0;
   }
 }
-
 .anim-rec {
   animation: dpulse 1.6s infinite;
 }
@@ -105,6 +324,185 @@
   transform: none;
 }
 
+/* Waveform bar bounce — per-bar staggered via inline `animation-delay`. */
+@keyframes ph-bar-bounce {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.ph-anim-bar {
+  animation: ph-bar-bounce 1.1s ease-in-out infinite;
+  transform-origin: 50% 100%;
+}
+
+/* Background blob drift — the AI orb's ambient motion. */
+@keyframes ph-blob-drift {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(3%, -4%) scale(1.05);
+  }
+  100% {
+    transform: translate(-2%, 3%) scale(0.98);
+  }
+}
+.ph-anim-drift {
+  animation: ph-blob-drift 23s ease-in-out infinite alternate;
+}
+.ph-anim-drift-fast {
+  animation: ph-blob-drift 19s ease-in-out infinite alternate;
+}
+.ph-anim-drift-slow {
+  animation: ph-blob-drift 27s ease-in-out infinite alternate;
+}
+
+/* Ambient glow pulse — normal (idle/listening) and fast (speaking/thinking). */
+@keyframes ph-glow-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+.ph-anim-pulse {
+  animation: ph-glow-pulse 2.8s ease-in-out infinite;
+}
+.ph-anim-pulse-fast {
+  animation: ph-glow-pulse 1.3s ease-in-out infinite;
+}
+
+/* SVG comet stroke draw — orb ring accents. */
+@keyframes ph-comet-draw {
+  from {
+    stroke-dashoffset: 300;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.ph-anim-comet {
+  stroke-dasharray: 300;
+  animation: ph-comet-draw 2.8s ease-in-out infinite;
+}
+.ph-anim-comet-fast {
+  stroke-dasharray: 300;
+  animation: ph-comet-draw 2.45s ease-in-out infinite;
+}
+.ph-anim-comet-slow {
+  stroke-dasharray: 300;
+  animation: ph-comet-draw 3.8s ease-in-out infinite;
+}
+
+/* Diagonal "thinking" sweep across the orb while the agent is thinking. */
+@keyframes ph-thinking-sweep {
+  0%,
+  100% {
+    transform: translateX(-30%) rotate(38deg);
+    opacity: 0.35;
+  }
+  50% {
+    transform: translateX(30%) rotate(38deg);
+    opacity: 0.75;
+  }
+}
+.ph-anim-sweep {
+  animation: ph-thinking-sweep 2.8s ease-in-out infinite;
+}
+
+/* Underwater-caustic diagonal drift for the interview room background. */
+@keyframes ph-caustic-drift {
+  0% {
+    background-position: 0% 0%;
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.85;
+  }
+  100% {
+    background-position: 100% 100%;
+    opacity: 0.5;
+  }
+}
+.ph-anim-caustic {
+  animation: ph-caustic-drift 18s ease-in-out infinite alternate;
+}
+
+/* Rotating gradient border-beam — highlights whoever currently owns the turn. */
+@keyframes ph-border-beam {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ph-anim-beam {
+  animation: ph-border-beam 3.6s linear infinite;
+}
+
+/* Three-dot "typing" bounce — 200ms per-dot stagger via inline delay. */
+@keyframes ph-dot-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+.ph-anim-dot {
+  animation: ph-dot-bounce 900ms ease-in-out infinite;
+}
+
+/* Expanding ring pulse — speaking state's outward rings. */
+@keyframes ph-ring-pulse {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+.ph-anim-ring {
+  animation: ph-ring-pulse 1.8s ease-out infinite;
+}
+
+/* Blinking transcript caret. */
+@keyframes ph-caret-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+.ph-anim-caret {
+  animation: ph-caret-blink 850ms step-end infinite;
+}
+
+/* Conic spin — the "thinking" scan ring. */
+@keyframes ph-conic-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ph-anim-conic {
+  animation: ph-conic-spin 3.2s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .reveal {
     opacity: 1;
@@ -112,7 +510,23 @@
     transition: none;
   }
   .anim-rec,
-  .anim-cursor {
-    animation: none;
+  .anim-cursor,
+  .ph-anim-bar,
+  .ph-anim-drift,
+  .ph-anim-drift-fast,
+  .ph-anim-drift-slow,
+  .ph-anim-pulse,
+  .ph-anim-pulse-fast,
+  .ph-anim-comet,
+  .ph-anim-comet-fast,
+  .ph-anim-comet-slow,
+  .ph-anim-sweep,
+  .ph-anim-caustic,
+  .ph-anim-beam,
+  .ph-anim-dot,
+  .ph-anim-ring,
+  .ph-anim-caret,
+  .ph-anim-conic {
+    animation: 0.01ms !important;
   }
 }

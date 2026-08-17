@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
+
 from ..core.adapters.mock import build_mock
 from ..core.logging import get_logger
 from ..shared_models import (
@@ -25,16 +27,20 @@ from ..shared_models import (
     CompanyIntel,
     GapAnalysis,
     JobSpec,
+    PlannedQuestion,
     QuestionPlan,
 )
+from . import role_packs
 from .cv_extract import extract_cv_text
 from .prompts import (
+    behavioral_round_prompts,
+    coding_round_prompts,
     company_research_prompts,
     cv_analysis_prompts,
     gap_matching_prompts,
+    general_round_prompts,
     jd_analysis_prompts,
     language_name,
-    question_planner_prompts,
 )
 from .state import PrepState
 
@@ -263,43 +269,210 @@ def _skill_library_hint(
         return ""
 
 
-async def question_planner(state: PrepState, deps: Deps) -> PrepState:
-    """Keystone: synthesize the full ``QuestionPlan`` from all upstream state."""
+class _RoundQuestions(BaseModel):
+    """LLM-call plumbing only: wraps a list so ``complete_json`` (which needs
+    *a* Pydantic schema per call) can return several ``PlannedQuestion``s from
+    one round call. Never exported, never added to ``packages/shared`` or the
+    ``MODELS`` registry — it's unwrapped into ``PlannedQuestion``s before
+    anything touches ``PrepState``.
+    """
+
+    questions: list[PlannedQuestion]
+
+
+# Fixed per-round question counts for the ~40-45 min interview tier: 1 intro +
+# 6 weighted-technical + 1 wrap from the general round, 1 from coding, 3 from
+# behavioral = 12 total, matching the reference docs' own trimmed proposals.
+_GENERAL_TECHNICAL_COUNT = 6
+_BEHAVIORAL_COUNT = 3
+_TIME_BUDGET_MIN = 40
+_SECTION_ORDER: tuple[str, ...] = ("intro", "behavioral", "technical", "coding", "wrap")
+
+# Canned fallback follow-up when a behavioral question comes back with an
+# empty followups list (e.g. the offline MockLLM) — guarantees followups[0]
+# is always a real individual-contribution probe, never missing.
+_BEHAVIORAL_FALLBACK_PROBE = "What did YOU specifically decide or do here — not what the team did?"
+
+
+def _reid(questions: list[PlannedQuestion], prefix: str) -> list[PlannedQuestion]:
+    """Re-assign ids as ``{prefix}-{n}`` so ids stay unique across rounds
+    regardless of what the model (or the offline mock, which always answers
+    "mock") returned.
+    """
+    return [q.model_copy(update={"id": f"{prefix}-{i + 1}"}) for i, q in enumerate(questions)]
+
+
+async def _round_questions(
+    deps: Deps, system: str, user: str, *, warn_state: PrepState, warn_message: str
+) -> list[PlannedQuestion]:
+    """Shared call + resilient-degrade wrapper for a round's LLM call."""
+    try:
+        result = await deps.llm.complete_json(system=system, user=user, schema=_RoundQuestions)
+        return result.questions
+    except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
+        log.warning("%s (%s)", warn_message, exc)
+        await _warn(warn_state, deps, [warn_message])
+        return build_mock(_RoundQuestions).questions
+
+
+async def general_round(state: PrepState, deps: Deps) -> PrepState:
+    """GENERAL round: intro + JD-weighted technical questions (anchored by
+    one signature/case question with a follow-up tree) + a wrap question.
+    """
     req = state["req"]
-    system, user = question_planner_prompts(
-        candidate=state["candidate"],
-        job=state["job"],
-        company=state["company"],
-        gap=state["gap"],
+    job = state["job"]
+    candidate = state["candidate"]
+    company = state["company"]
+    gap = state["gap"]
+
+    family = role_packs.infer_role_family(job)
+    band = role_packs.seniority_band(role_packs.infer_seniority(candidate))
+    weights = role_packs.infer_competency_weights(family, band, job)
+    counts = role_packs.allocate_question_counts(weights, _GENERAL_TECHNICAL_COUNT)
+
+    hint = _skill_library_hint(company=company.name, role=job.title, level=job.seniority)
+    system, user = general_round_prompts(
+        candidate=candidate,
+        job=job,
+        company=company,
+        gap=gap,
+        language_mode=req.language_mode,
+        weights=weights,
+        counts=counts,
+        hint=hint,
+    )
+    questions = await _round_questions(
+        deps,
+        system,
+        user,
+        warn_state=state,
+        warn_message="Could not tailor the general round; used a minimal set.",
+    )
+
+    valid_sections = {"intro", "technical", "wrap"}
+    pinned = [
+        q.model_copy(update={"section": q.section if q.section in valid_sections else "technical"})
+        for q in questions
+    ]
+    pinned = _reid(pinned, "gen")
+    await _mark(state, deps, "general_round")
+    return {"general_questions": pinned}
+
+
+async def coding_round(state: PrepState, deps: Deps) -> PrepState:
+    """CODING round: exactly one spoken, think-aloud problem, topic and
+    difficulty chosen deterministically by ``role_packs.select_coding_topic``
+    from role family + the candidate's actual stack + inferred seniority.
+    """
+    req = state["req"]
+    job = state["job"]
+    candidate = state["candidate"]
+    gap = state["gap"]
+    company = state["company"]
+
+    family = role_packs.infer_role_family(job)
+    seniority = role_packs.infer_seniority(candidate)
+    topic, difficulty = role_packs.select_coding_topic(family, job.tech_stack, seniority)
+    topic_meta = role_packs.coding_topic_meta(family, topic)
+
+    hint = _skill_library_hint(company=company.name, role=job.title, level=job.seniority)
+    system, user = coding_round_prompts(
+        candidate=candidate,
+        job=job,
+        gap=gap,
+        language_mode=req.language_mode,
+        topic=topic,
+        topic_meta=topic_meta,
+        difficulty=difficulty,
+        hint=hint,
+    )
+    questions = await _round_questions(
+        deps,
+        system,
+        user,
+        warn_state=state,
+        warn_message="Could not tailor the coding round; used a minimal question.",
+    )
+    # Exactly one problem, always — deterministically pinned regardless of
+    # what (or how many) the model returned.
+    questions = questions[:1] or build_mock(_RoundQuestions).questions[:1]
+
+    pinned = []
+    for q in questions:
+        followups = list(q.followups)[:1] or [topic_meta["hint"]]
+        pinned.append(
+            q.model_copy(
+                update={
+                    "section": "coding",
+                    "difficulty": difficulty,
+                    "target_competency": topic,
+                    "followups": followups,
+                }
+            )
+        )
+    pinned = _reid(pinned, "code")
+    await _mark(state, deps, "coding_round")
+    return {"coding_questions": pinned}
+
+
+async def behavioral_round(state: PrepState, deps: Deps) -> PrepState:
+    """BEHAVIORAL round: STAR-style questions grounded in specific CV
+    achievements, each with a pre-written individual-contribution follow-up
+    pinned into ``followups[0]``.
+    """
+    req = state["req"]
+    job = state["job"]
+    candidate = state["candidate"]
+    gap = state["gap"]
+    company = state["company"]
+
+    hint = _skill_library_hint(company=company.name, role=job.title, level=job.seniority)
+    system, user = behavioral_round_prompts(
+        candidate=candidate,
+        job=job,
+        gap=gap,
+        language_mode=req.language_mode,
+        count=_BEHAVIORAL_COUNT,
+        hint=hint,
+    )
+    questions = await _round_questions(
+        deps,
+        system,
+        user,
+        warn_state=state,
+        warn_message="Could not tailor the behavioral round; used a minimal set.",
+    )
+
+    pinned = []
+    for q in questions:
+        followups = list(q.followups)[:1] or [_BEHAVIORAL_FALLBACK_PROBE]
+        pinned.append(q.model_copy(update={"section": "behavioral", "followups": followups}))
+    pinned = _reid(pinned, "beh")
+    await _mark(state, deps, "behavioral_round")
+    return {"behavioral_questions": pinned}
+
+
+async def assemble_plan(state: PrepState, deps: Deps) -> PrepState:
+    """Join node: stitch the three rounds' questions into the final
+    ``QuestionPlan``, ordered by the fixed section order, with the request's
+    language_mode pinned regardless of what any round echoed back.
+    """
+    req = state["req"]
+    all_questions: list[PlannedQuestion] = [
+        *state.get("general_questions", []),
+        *state.get("behavioral_questions", []),
+        *state.get("coding_questions", []),
+    ]
+    by_section: dict[str, list[PlannedQuestion]] = {s: [] for s in _SECTION_ORDER}
+    for q in all_questions:
+        by_section.setdefault(q.section, []).append(q)
+    ordered = [q for section in _SECTION_ORDER for q in by_section.get(section, [])]
+
+    plan = QuestionPlan(
+        sections_order=list(_SECTION_ORDER),
+        questions=ordered,
+        time_budget_min=_TIME_BUDGET_MIN,
         language_mode=req.language_mode,
     )
-    # WP-10: inject any matching distilled playbook as extra planner context.
-    hint = _skill_library_hint(
-        company=state["company"].name,
-        role=state["job"].title,
-        level=state["job"].seniority,
-    )
-    if hint:
-        user = (
-            f"{user}\n\n"
-            "PLAYBOOK REFERENCE (from the interview skill library — adapt to THIS "
-            "candidate and JD; prefer reusing its strongest questions over "
-            "inventing near-duplicates, and never copy questions that don't fit "
-            "the gap analysis):\n"
-            f"{hint}"
-        )
-    try:
-        plan = await deps.llm.complete_json(
-            system=system, user=user, schema=QuestionPlan
-        )
-    except Exception as exc:  # noqa: BLE001 - keystone must still emit a valid plan
-        log.warning("question_planner failed, using minimal generic plan (%s)", exc)
-        plan = build_mock(QuestionPlan)
-        await _warn(
-            state, deps, ["Could not tailor the question plan; used a generic one."]
-        )
-    # Pin the language mode to the request so the live loop routes voice correctly,
-    # regardless of what the model echoed back.
-    plan = plan.model_copy(update={"language_mode": req.language_mode})
-    await _mark(state, deps, "question_planner")
+    await _mark(state, deps, "assemble_plan")
     return {"plan": plan}

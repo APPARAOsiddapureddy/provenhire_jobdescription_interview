@@ -4,6 +4,7 @@ import * as Api from "./api";
 import * as C from "./candidate";
 import * as Co from "./company";
 import * as G from "./gap";
+import * as Ig from "./integrity";
 import * as I from "./interview-context";
 import * as J from "./job";
 import * as P from "./primitives";
@@ -45,4 +46,5 @@ export const SCHEMAS: Record<string, ZodType> = {
   KbIngestResponse: Api.KbIngestResponseSchema,
   KbQueryRequest: Api.KbQueryRequestSchema,
   KbQueryResponse: Api.KbQueryResponseSchema,
+  IntegritySettings: Ig.IntegritySettingsSchema,
 };

@@ -35,16 +35,16 @@ def _garbage_request() -> PrepRequest:
     )
 
 
-def test_run_prep_records_all_five_progress_steps() -> None:
+def test_run_prep_records_all_progress_steps() -> None:
     deps = build_deps()
     session_id = asyncio.run(run_prep(_good_request(), deps))
 
     view = asyncio.run(deps.repo.get_session_view(session_id))
     assert isinstance(view, SessionView)
     assert view.status == "ready"
-    # All five agents reported completion; order is non-deterministic (fan-out).
+    # Every prep node reported completion; order is non-deterministic (fan-out).
     assert set(view.progress) == _ALL_STEPS
-    assert len(view.progress) == 5, "no duplicate progress entries"
+    assert len(view.progress) == len(PROGRESS_STEPS), "no duplicate progress entries"
 
 
 def test_get_session_view_carries_context_when_ready() -> None:

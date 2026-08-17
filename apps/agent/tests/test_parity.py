@@ -7,8 +7,12 @@ collapses int/number, and unwraps nullable unions) so the only thing that can
 break parity is a field's name, coarse type, or required-ness.
 
 The Zod schemas live in packages/shared/schema/<Name>.json and are produced by
-`pnpm --filter @proven-hire/shared gen:schema`. If that directory is empty
-(schemas not yet generated) the parity tests are skipped rather than failed.
+`pnpm --filter @proven-hire/shared gen:schema`. turbo.json's dependsOn graph
+and CI both run that step before this suite, but a direct `pytest` invocation
+(bypassing turbo/CI — e.g. from an IDE or muscle memory) does not. If that
+directory is empty, the parity tests FAIL LOUDLY with a message pointing at
+the generation command — a suite that silently skipped its only
+cross-language contract coverage was worse than one that fails clearly.
 """
 
 import json
@@ -90,14 +94,18 @@ def _normalize(schema: dict) -> dict:
 
 
 _SCHEMAS_PRESENT = SCHEMA_DIR.exists() and any(SCHEMA_DIR.glob("*.json"))
-
-
-@pytest.mark.skipif(
-    not _SCHEMAS_PRESENT,
-    reason="Zod JSON Schemas not generated; run `pnpm --filter @proven-hire/shared gen:schema`",
+_MISSING_SCHEMAS_MSG = (
+    "Zod JSON Schemas not generated (packages/shared/schema is empty). "
+    "Run `pnpm --filter @proven-hire/shared gen:schema` first — this suite "
+    "cannot verify cross-language parity without them, so it fails rather "
+    "than silently skipping."
 )
+
+
 @pytest.mark.parametrize("name", list(MODELS.keys()))
 def test_schema_parity(name: str) -> None:
+    if not _SCHEMAS_PRESENT:
+        pytest.fail(_MISSING_SCHEMAS_MSG, pytrace=False)
     model = MODELS[name]
     zod_path = SCHEMA_DIR / f"{name}.json"
     assert zod_path.exists(), f"Missing generated Zod schema for {name}: {zod_path}"
@@ -119,15 +127,13 @@ def test_schema_parity(name: str) -> None:
     )
 
 
-@pytest.mark.skipif(
-    not _SCHEMAS_PRESENT,
-    reason="Zod JSON Schemas not generated; run `pnpm --filter @proven-hire/shared gen:schema`",
-)
 def test_every_generated_schema_has_a_pydantic_mirror() -> None:
     """Reverse coverage: a TS-only model (new schema/*.json with no Pydantic
     mirror in MODELS) must fail loudly, not silently escape parity. The forward
     test only iterates MODELS, so without this a new Zod schema is never checked.
     """
+    if not _SCHEMAS_PRESENT:
+        pytest.fail(_MISSING_SCHEMAS_MSG, pytrace=False)
     generated = {p.stem for p in SCHEMA_DIR.glob("*.json")}
     registered = set(MODELS)
     missing_mirror = sorted(generated - registered)

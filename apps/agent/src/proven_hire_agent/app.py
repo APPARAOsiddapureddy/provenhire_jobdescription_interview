@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI
 
 from .api import coach as coach_api
+from .api import integrity as integrity_api
 from .api import kb as kb_api
 from .api import prep as prep_api
 from .api import score as score_api
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(score_api.router, dependencies=guarded)
     app.include_router(coach_api.router, dependencies=guarded)
     app.include_router(kb_api.router, dependencies=guarded)
+    app.include_router(integrity_api.router, dependencies=guarded)
     app.include_router(session_api.router)
     return app
 

@@ -34,7 +34,10 @@ PROGRESS_STEPS: tuple[str, ...] = (
     "jd_analysis",
     "company_research",
     "gap_matching",
-    "question_planner",
+    "general_round",
+    "coding_round",
+    "behavioral_round",
+    "assemble_plan",
 )
 
 

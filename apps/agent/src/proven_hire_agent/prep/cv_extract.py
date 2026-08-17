@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -71,6 +72,40 @@ _GEMINI_PROMPT = (
     "Output only the text, no commentary."
 )
 
+# A markdown table separator row: only |, -, : and whitespace (e.g.
+# "| ----------- | --- | --- |"). Matches a whole line.
+_TABLE_SEPARATOR_RE = re.compile(r"^[\s|:\-]+$")
+_MULTI_SPACE_RE = re.compile(r" {2,}")
+
+
+def _clean_markitdown_tables(text: str) -> str:
+    """Strip markitdown's markdown-table artifacts from whitespace-aligned PDFs.
+
+    THE BUG this fixes: markitdown converts any whitespace-column-aligned PDF
+    text (a common résumé layout — name/contact lines, label-value pairs) into
+    markdown tables, one per line, each followed by a "| --- | --- |"-style
+    separator row. On a résumé that's mostly single-column prose, those
+    separator rows (pure punctuation, zero letters) came to dominate the
+    character count enough to drop the alphabetic ratio from ~0.79 to ~0.30 —
+    under ``assess_text``'s 0.45 "looks like real content" gate. The CV was
+    then flagged as "empty or like random characters" and the ENTIRE prep
+    pipeline silently degraded to generic "mock" candidate/job/plan data,
+    with no error surfaced to the candidate — just a context-free interview.
+
+    Dropping separator rows and un-piping the remaining cells restores normal
+    prose (verified: 0.296 -> 0.788 alpha ratio on a real résumé) with no loss
+    of content — the pipes carried no information markitdown didn't already
+    put in the cell text itself.
+    """
+    lines = []
+    for line in text.split("\n"):
+        if "|" in line and _TABLE_SEPARATOR_RE.match(line):
+            continue
+        line = _MULTI_SPACE_RE.sub(" ", line.replace("|", " ")).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
 
 def _suffix_for_mime(mime: str) -> str:
     """Best file suffix for ``mime`` (defaults to ``.txt`` for unknown types)."""
@@ -104,7 +139,7 @@ def _markitdown_extract(data: bytes, mime: str) -> str:
             tmp.write(data)
             tmp_path = tmp.name
         result = MarkItDown().convert(tmp_path)
-        return (result.text_content or "").strip()
+        return _clean_markitdown_tables((result.text_content or "").strip())
     except Exception as exc:  # noqa: BLE001 - best-effort: any failure -> empty
         log.warning("markitdown conversion failed (%s)", exc)
         return ""

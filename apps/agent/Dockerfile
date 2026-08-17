@@ -12,8 +12,12 @@
 #              python -m proven_hire_agent.worker
 #            docker-compose.yml runs the worker via the `live` profile.
 #
-# BUILD CONTEXT = repo root (matches docker-compose.yml `context: .`):
-#     docker build -f apps/agent/Dockerfile -t proven-hire-agent .
+# BUILD CONTEXT = this directory (apps/agent), matching docker-compose.yml
+# `context: ./apps/agent` AND the LiveKit Cloud Agents build service, which
+# requires the Dockerfile at the root of its build context (no custom
+# Dockerfile-path support as of 2026 — see livekit/livekit-cli#688):
+#     docker build -t proven-hire-agent .          # (run from apps/agent/)
+#     lk agent create                                # (run from apps/agent/)
 
 FROM python:3.11-slim AS base
 
@@ -31,7 +35,7 @@ WORKDIR /app
 # Dependency layers FIRST (lockfiles only, --no-install-project), source LAST:
 # deps and the baked ML models stay cached across code edits — previously any
 # one-line src change re-downloaded the turn-detector weights (minutes).
-COPY apps/agent/pyproject.toml apps/agent/uv.lock ./
+COPY pyproject.toml uv.lock ./
 
 # Base deps + the lightweight provider SDKs (gemini/openai/supabase/tavily).
 # Without them, setting e.g. SUPABASE_URL or LLM_PROVIDER=gemini in .env makes
@@ -56,9 +60,17 @@ from livekit.agents.plugin import Plugin; \
 
 # ---- api: deps + source (compose `agent-api` builds target: api) ------------
 FROM base AS api
-COPY apps/agent/src ./src
+COPY src ./src
 RUN uv sync --frozen --no-dev --extra gemini --extra openai --extra supabase --extra tavily \
  || uv sync --no-dev --extra gemini --extra openai --extra supabase --extra tavily
+
+# Run as a non-root user (build stays root — uv/venv writes are simplest
+# there; only the running process drops privilege), matching apps/web/Dockerfile.
+RUN groupadd --system --gid 1001 appuser \
+ && useradd --system --uid 1001 --gid appuser appuser \
+ && chown -R appuser:appuser /app
+USER appuser
+ENV HOME=/app
 
 EXPOSE 8000
 
@@ -70,8 +82,16 @@ CMD ["uv", "run", "uvicorn", "proven_hire_agent.app:app", "--host", "0.0.0.0", "
 # imports at load time, so running the worker off the api image would
 # ModuleNotFoundError.
 FROM worker-deps AS worker
-COPY apps/agent/src ./src
+COPY src ./src
 RUN uv sync --frozen --no-dev --extra livekit --extra gemini --extra openai --extra supabase --extra tavily \
  || uv sync --no-dev --extra livekit --extra gemini --extra openai --extra supabase --extra tavily
+
+# Run as a non-root user, matching the api stage above / apps/web/Dockerfile.
+RUN groupadd --system --gid 1001 appuser \
+ && useradd --system --uid 1001 --gid appuser appuser \
+ && chown -R appuser:appuser /app
+USER appuser
+ENV HOME=/app
+
 # `start` connects to LiveKit and waits for jobs (needs LIVEKIT_*/STT/TTS keys).
 CMD ["uv", "run", "python", "-m", "proven_hire_agent.worker", "start"]

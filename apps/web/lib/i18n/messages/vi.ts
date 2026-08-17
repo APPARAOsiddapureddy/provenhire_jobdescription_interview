@@ -23,6 +23,8 @@ export const vi: Localized<Messages> = {
     cancel: "Hủy",
     loading: "Đang tải…",
     error: "Đã có lỗi xảy ra.",
+    integrityTrustLine:
+      "ProvenHire sử dụng giám sát tính trung thực để đảm bảo đánh giá công bằng.",
   },
   nav: {
     setup: "Thiết lập",
