@@ -174,6 +174,9 @@ export function InterviewRoomClient({
   const [connectionLost, setConnectionLost] = React.useState<string | null>(
     null,
   );
+  const [micFailureMsg, setMicFailureMsg] = React.useState<string | null>(
+    null,
+  );
   const [joinAttempt, setJoinAttempt] = React.useState(0);
 
   const handleError = React.useCallback((error: Error) => {
@@ -288,15 +291,32 @@ export function InterviewRoomClient({
         data-session={sessionId}
         onError={handleError}
         onMediaDeviceFailure={(failure) => {
-          // Mic capture failed — logged for now via console; the room's
-          // "Mic muted" pill already reflects `isMicrophoneEnabled` being
-          // false, and describeMicFailure is available for a fuller banner
-          // if this needs to be more visible later.
-          void describeMicFailure(failure);
+          // Mic capture failed (permission denied / no device / device busy).
+          // The room's "Mic muted" pill shows the state but has no fix built
+          // in, so without this the candidate is stuck seeing questions with
+          // no way to answer and no explanation why.
+          setMicFailureMsg(describeMicFailure(failure));
         }}
         onDisconnected={handleDisconnected}
       >
         <RoomAudioRenderer />
+        {micFailureMsg && (
+          <div
+            role="alert"
+            className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-4 bg-[#3a1010] px-6 py-3 text-center text-[13px] text-white shadow-lg"
+          >
+            <span>{micFailureMsg}</span>
+            <PHButton
+              variant="secondary"
+              onClick={() => {
+                setMicFailureMsg(null);
+                setJoinAttempt((n) => n + 1);
+              }}
+            >
+              Try again
+            </PHButton>
+          </div>
+        )}
         <InterviewRoomLive
           sessionId={sessionId}
           candidateName={candidateName}
