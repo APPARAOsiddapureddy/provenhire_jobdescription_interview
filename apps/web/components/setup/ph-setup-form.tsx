@@ -69,6 +69,8 @@ const SAMPLES = [
     id: "backend",
     label: "Backend Engineer · Stripe",
     role: "Senior Backend Engineer",
+    name: "Jordan Rivera",
+    email: "jordan.rivera@example.com",
     jd: "Senior Backend Engineer to build payment APIs at scale. Own services in Python/Go, design event-driven systems with Kafka, and ensure reliability, idempotency, and low p99 latency on PostgreSQL. Strong distributed-systems background required.",
     cv: "Jordan Rivera — Senior Backend Engineer. 7 years building high-throughput payment and API platforms. Led a ledger service at 5k req/s; cut p99 latency 40% with async batching; owned idempotency and reconciliation. Skills: Python, Go, PostgreSQL, Kafka, gRPC, Kubernetes, distributed systems.",
   },
@@ -76,6 +78,8 @@ const SAMPLES = [
     id: "frontend",
     label: "Frontend Engineer · Vercel",
     role: "Senior Frontend Engineer",
+    name: "Sam Chen",
+    email: "sam.chen@example.com",
     jd: "Senior Frontend Engineer to build fast, delightful web experiences with Next.js and React. Own component architecture, Core Web Vitals, accessibility, and design-system work. Deep TypeScript and modern rendering (SSR/streaming) experience expected.",
     cv: "Sam Chen — Senior Frontend Engineer. 6 years shipping performant React/Next.js apps. Built a design system used across 30+ surfaces; improved LCP 35% with streaming SSR and image optimization. Skills: TypeScript, React, Next.js, Tailwind, accessibility, Core Web Vitals.",
   },
@@ -83,6 +87,8 @@ const SAMPLES = [
     id: "ml",
     label: "ML Engineer · OpenAI",
     role: "Machine Learning Engineer",
+    name: "Priya Nair",
+    email: "priya.nair@example.com",
     jd: "Machine Learning Engineer to build and ship production ML systems: data pipelines, training, evaluation, and low-latency serving. You will own offline/online metrics, monitoring, and safe rollouts. Strong Python + PyTorch and MLOps experience required.",
     cv: "Priya Nair — Machine Learning Engineer. 5 years in production ML: built feature pipelines and model serving for ranking at scale; owned offline/online evaluation and safe rollback. Skills: Python, PyTorch, Ray, feature stores, evaluation, MLOps, monitoring.",
   },
@@ -147,6 +153,8 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
     setCvText(s.cv);
     setJdText(s.jd);
     setRole(s.role);
+    setName(s.name);
+    setEmail(s.email);
     setCvTouched(false);
     setJdTouched(false);
     setError(null);
