@@ -30,7 +30,11 @@ export function useDevtoolsGuard(
       const isOpen =
         widthDelta > OPEN_THRESHOLD_PX || heightDelta > OPEN_THRESHOLD_PX;
       if (isOpen && !wasOpen) {
-        onViolation("devtools_detection", "Developer tools appear to be open.");
+        onViolation(
+          "devtools_detection",
+          "devtools_detected",
+          "Developer tools appear to be open.",
+        );
       }
       wasOpen = isOpen;
     }, POLL_MS);

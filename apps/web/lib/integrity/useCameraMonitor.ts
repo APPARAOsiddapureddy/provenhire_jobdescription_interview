@@ -120,7 +120,7 @@ export function useCameraMonitor(
       const now = Date.now();
       if (now - (lastReport[key] ?? 0) < REPORT_COOLDOWN_MS) return;
       lastReport[key] = now;
-      onViolation("camera_ai_detection", message);
+      onViolation("camera_ai_detection", key, message);
     }
 
     async function setup() {
@@ -155,9 +155,12 @@ export function useCameraMonitor(
         const faces = faceDetector.detectForVideo(canvas, performance.now());
         const faceCount = faces.detections.length;
         if (faceCount === 0) {
-          report("no_face", "No face detected in camera view.");
+          // Type names match packages/shared/data/proctoring-weights.json's
+          // keys exactly (face_missing=0.25, multiple_faces=1) so these
+          // reports carry real weight; phone/low_light are weight-0/logged.
+          report("face_missing", "No face detected in camera view.");
         } else if (faceCount > 1) {
-          report("multi_face", "Multiple faces detected in camera view.");
+          report("multiple_faces", "Multiple faces detected in camera view.");
         }
 
         void cocoModel.detect(canvas).then((preds) => {
@@ -166,7 +169,7 @@ export function useCameraMonitor(
               (p) => p.class === "cell phone" && p.score > PHONE_CONFIDENCE,
             )
           ) {
-            report("phone", "A phone was detected in camera view.");
+            report("phone_detected", "A phone was detected in camera view.");
           }
         });
 

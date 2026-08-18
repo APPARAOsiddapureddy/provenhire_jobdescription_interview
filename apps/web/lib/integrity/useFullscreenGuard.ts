@@ -38,7 +38,11 @@ export function useFullscreenGuard(
       const nowFullscreen = Boolean(document.fullscreenElement);
       setNeedsFullscreen(!nowFullscreen);
       if (!nowFullscreen && wasFullscreenRef.current) {
-        onViolation("fullscreen_required", "Fullscreen mode was exited.");
+        onViolation(
+          "fullscreen_required",
+          "fullscreen_exit",
+          "Fullscreen mode was exited.",
+        );
       }
       wasFullscreenRef.current = nowFullscreen;
     }

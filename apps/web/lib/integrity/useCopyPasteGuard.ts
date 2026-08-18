@@ -24,10 +24,15 @@ export function useCopyPasteGuard(
         e.preventDefault();
         onBlocked(
           "copy_paste_detection",
+          "clipboard_blocked",
           "Copy/paste and the right-click menu are disabled during this assessment.",
         );
       } else {
-        onBlocked("copy_paste_detection", "Copy/paste activity detected.");
+        onBlocked(
+          "copy_paste_detection",
+          "clipboard_blocked",
+          "Copy/paste activity detected.",
+        );
       }
     }
 

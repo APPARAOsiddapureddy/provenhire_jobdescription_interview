@@ -36,8 +36,14 @@ import {
   type RoomPhase,
   type TurnHistoryEntry,
 } from "./interview-room-floor";
+import {
+  IntegrityBanner,
+  FullscreenRequiredModal,
+  ProctoringBanModal,
+} from "./integrity-overlay";
 import { useCameraPreview } from "./use-camera-preview";
 import { useMicEnergy } from "./use-mic-energy";
+import { useIntegrityMonitor } from "@/lib/integrity";
 import { PHButton } from "@/components/design-system";
 
 // Same topic livekit-agents' RoomIO registers its chat handler on — typed
@@ -203,8 +209,34 @@ export function InterviewRoomLive({
     router.push(`/report/${encodeURIComponent(sessionId)}`);
   }
 
+  // useIntegrityMonitor needs a STABLE onAutoEnd identity (it's a dependency
+  // of every guard hook it wires up) — endInterview itself is a fresh
+  // closure every render, so it's stashed in a ref and read through a
+  // zero-dependency callback. Same pattern as components/interview/
+  // live-room.tsx, ported verbatim rather than reinvented.
+  const endInterviewRef = React.useRef<() => void>(() => {});
+  endInterviewRef.current = () => void endInterview();
+  const onAutoEnd = React.useCallback(() => endInterviewRef.current(), []);
+
+  // This is the fix for the wiring gap: useIntegrityMonitor was previously
+  // only called from the OLDER components/interview/live-room.tsx room —
+  // this (InterviewRoomLive) is the room actually in use today, and had
+  // ZERO integrity wiring until now.
+  const {
+    banner: integrityBanner,
+    banned,
+    needsFullscreen,
+    requestFullscreen,
+  } = useIntegrityMonitor(sessionId, onAutoEnd);
+
   return (
     <>
+      {integrityBanner && <IntegrityBanner banner={integrityBanner} />}
+      {banned && <ProctoringBanModal onTimeout={onAutoEnd} />}
+      {!banned && needsFullscreen && (
+        <FullscreenRequiredModal onContinue={requestFullscreen} />
+      )}
+
       {!canPlayAudio && (
         <ModalScaffold titleId="audio-unlock-title">
           <p id="audio-unlock-title" className="text-[19px] font-semibold text-white">

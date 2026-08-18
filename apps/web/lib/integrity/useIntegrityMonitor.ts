@@ -7,6 +7,7 @@ import {
   STRIKE_ELIGIBLE_RULES,
   type IntegrityRuleState,
   type IntegritySettings,
+  type ProctoringSeverity,
 } from "@proven-hire/shared";
 import { useFullscreenGuard } from "./useFullscreenGuard";
 import { useTabVisibilityGuard } from "./useTabVisibilityGuard";
@@ -31,10 +32,20 @@ const BANNER_MS = 4500;
  * hook is the one place that decides what MONITOR vs STRICT means (toast
  * only vs toast + strike) and when 3 strikes on the SAME rule class should
  * end the session, matching the settings page's documented semantics.
+ *
+ * Every violation ALSO fire-and-forgets a POST to the generic proctoring
+ * event log (`/api/proctoring-events`, see the Integrity Controls rework
+ * plan) and reads back the session's cumulative weighted-decay strike
+ * score. Crossing the ban threshold sets `banned` — additive to, not a
+ * replacement for, the existing per-rule 3-strike auto-end below; whichever
+ * fires first ends the interview. `banned` itself does NOT call onAutoEnd
+ * directly: the consumer renders a ban countdown modal (own timer) that
+ * calls onAutoEnd when it completes, mirroring the fullscreen-exit modal.
  */
-export function useIntegrityMonitor(onAutoEnd: () => void) {
+export function useIntegrityMonitor(sessionId: string, onAutoEnd: () => void) {
   const [settings, setSettings] = useState<IntegritySettings | null>(null);
   const [banner, setBanner] = useState<IntegrityBanner | null>(null);
+  const [banned, setBanned] = useState(false);
   const strikesRef = useRef<Partial<Record<GuardRuleClass, number>>>({});
   const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -63,7 +74,12 @@ export function useIntegrityMonitor(onAutoEnd: () => void) {
   );
 
   const reportViolation = useCallback(
-    (rule: GuardRuleClass, message: string) => {
+    (
+      rule: GuardRuleClass,
+      eventType: string,
+      message: string,
+      opts?: { photo?: string; severity?: ProctoringSeverity },
+    ) => {
       const level = settings?.[rule];
       if (!level || level === "off") return; // guard fired after settings changed underneath it
 
@@ -82,8 +98,31 @@ export function useIntegrityMonitor(onAutoEnd: () => void) {
       setBanner({ rule, message, level });
       if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
       bannerTimerRef.current = setTimeout(() => setBanner(null), BANNER_MS);
+
+      // Fire-and-forget: persist the event + get back the authoritative
+      // weighted-decay score. A failed/slow POST never blocks the banner
+      // above (already shown synchronously) — this only adds the ban path.
+      fetch("/api/proctoring-events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: eventType,
+          severity: opts?.severity ?? (level === "strict" ? "warning" : "info"),
+          message,
+          photo: opts?.photo ?? null,
+        }),
+      })
+        .then((r) => r.json())
+        .then((json: { ban_triggered?: boolean }) => {
+          if (json.ban_triggered) setBanned(true);
+        })
+        .catch(() => {
+          // Offline/agent-down: the interview already isn't blocked on this
+          // (matches /api/integrity-settings' fail-open posture).
+        });
     },
-    [settings, onAutoEnd],
+    [settings, onAutoEnd, sessionId],
   );
 
   // "AI Behavior Analysis" is the master switch: OFF means none of the
@@ -118,6 +157,7 @@ export function useIntegrityMonitor(onAutoEnd: () => void) {
   return {
     settings,
     banner,
+    banned,
     needsFullscreen,
     requestFullscreen,
     cameraStatus,

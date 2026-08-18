@@ -413,7 +413,7 @@ function LiveSession({
     needsFullscreen,
     requestFullscreen,
     cameraStatus,
-  } = useIntegrityMonitor(onAutoEnd);
+  } = useIntegrityMonitor(sessionId, onAutoEnd);
   const cameraRequired = integritySettings?.camera_required !== "off";
   const cameraUnavailable =
     cameraRequired &&

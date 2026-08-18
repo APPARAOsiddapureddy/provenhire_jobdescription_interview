@@ -18,6 +18,11 @@ export function useTabVisibilityGuard(
       if (document.hidden) {
         onViolation(
           "tab_switching_detection",
+          // "window_blur" (weight 0.5) is the closest existing weight-table
+          // match for this single visibilitychange signal. The 3-signal
+          // rewrite (blur/focus + this + a hasFocus() poll, with its own
+          // rapid-switch detection) is a later pass — see the rework plan.
+          "window_blur",
           "Switched away from the interview tab.",
         );
       }

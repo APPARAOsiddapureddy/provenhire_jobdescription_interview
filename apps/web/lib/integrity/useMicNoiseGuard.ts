@@ -69,6 +69,7 @@ export function useMicNoiseGuard(
           lastReportRef.current = now;
           onViolation(
             "microphone_monitoring",
+            "loud_background_audio",
             "Sustained loud background audio detected.",
           );
         }
