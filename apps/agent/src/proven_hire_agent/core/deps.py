@@ -18,6 +18,10 @@ from .persistence.integrity_repository import (
     IntegritySettingsRepository,
     get_integrity_repository,
 )
+from .persistence.live_session_repository import (
+    LiveSessionRepository,
+    get_live_session_repository,
+)
 from .persistence.proctoring_repository import (
     ProctoringEventsRepository,
     get_proctoring_repository,
@@ -35,6 +39,7 @@ class Deps:
     repo: SessionRepository
     integrity_repo: IntegritySettingsRepository
     proctoring_repo: ProctoringEventsRepository
+    live_session_repo: LiveSessionRepository
 
 
 def _assemble(settings: Settings) -> Deps:
@@ -47,6 +52,7 @@ def _assemble(settings: Settings) -> Deps:
         repo=get_repository(settings),
         integrity_repo=get_integrity_repository(settings),
         proctoring_repo=get_proctoring_repository(settings),
+        live_session_repo=get_live_session_repository(settings),
     )
 
 
