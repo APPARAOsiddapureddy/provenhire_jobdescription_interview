@@ -61,6 +61,7 @@ from livekit.agents.plugin import Plugin; \
 # ---- api: deps + source (compose `agent-api` builds target: api) ------------
 FROM base AS api
 COPY src ./src
+COPY data ./data
 RUN uv sync --frozen --no-dev --extra gemini --extra openai --extra supabase --extra tavily \
  || uv sync --no-dev --extra gemini --extra openai --extra supabase --extra tavily
 
@@ -83,6 +84,7 @@ CMD ["uv", "run", "uvicorn", "proven_hire_agent.app:app", "--host", "0.0.0.0", "
 # ModuleNotFoundError.
 FROM worker-deps AS worker
 COPY src ./src
+COPY data ./data
 RUN uv sync --frozen --no-dev --extra livekit --extra gemini --extra openai --extra supabase --extra tavily \
  || uv sync --no-dev --extra livekit --extra gemini --extra openai --extra supabase --extra tavily
 

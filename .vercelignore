@@ -2,6 +2,13 @@
 # files. Everything else in this monorepo is dead weight for a Vercel build
 # (or, worse, pushes the upload past Vercel's 100MB CLI limit).
 
+# Secrets — never uploaded to Vercel's build servers. Must come before the
+# narrower apps/agent excludes below so this still applies even though that
+# directory is no longer blanket-excluded.
+**/.env
+**/.env.*
+!**/.env.example
+
 # Portable local tooling / venvs — large, machine-specific, gitignored too.
 .tools/
 **/.venv/
@@ -20,8 +27,17 @@ dist/
 **/*.tsbuildinfo
 .pnpm-store/
 
-# Not needed to build the Next.js app
-/apps/agent/
+# Not needed to build the Next.js app — apps/agent is excluded piecemeal
+# (not as a blanket /apps/agent/) because packages/shared/src/proctoring.ts
+# reaches into apps/agent/data/proctoring-weights.json (see that file's
+# comment for why); a blanket directory exclude would also hide that one
+# small file the web build genuinely needs.
+/apps/agent/src/
+/apps/agent/tests/
+/apps/agent/*.toml
+/apps/agent/*.lock
+/apps/agent/Dockerfile*
+/apps/agent/.dockerignore
 /services/
 /docs/
 /skills/

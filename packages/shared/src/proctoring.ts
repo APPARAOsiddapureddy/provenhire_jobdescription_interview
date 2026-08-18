@@ -1,5 +1,12 @@
 import { z } from "zod";
-import weightsData from "../data/proctoring-weights.json";
+// Lives in apps/agent/data/, NOT packages/shared/data/: every Python
+// deployment in this repo (Render's agent-api, the LiveKit Cloud worker)
+// Docker-builds with apps/agent as its OWN build context, never seeing
+// packages/shared/ at all — so the single physical source of truth has to
+// live somewhere every deployment target can actually reach. This is that
+// somewhere; .vercelignore carries a narrow exception so the web build can
+// still see this one file despite excluding the rest of apps/agent.
+import weightsData from "../../../apps/agent/data/proctoring-weights.json";
 
 /**
  * Generic proctoring event log — the "add a new detector without a

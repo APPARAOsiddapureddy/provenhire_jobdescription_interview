@@ -25,6 +25,7 @@ RUN uv sync --frozen --no-dev --no-install-project --extra gemini --extra openai
 
 FROM base AS api
 COPY src ./src
+COPY data ./data
 RUN uv sync --frozen --no-dev --extra gemini --extra openai --extra supabase --extra tavily \
  || uv sync --no-dev --extra gemini --extra openai --extra supabase --extra tavily
 
