@@ -1,25 +1,52 @@
 """``/api/live`` — the custom (non-LiveKit) live-voice transport's backend seam.
 
-Phase 1 of the LiveKit replacement (see the plan): mints a short-lived,
-scoped Deepgram token for the browser's direct WebSocket connection, rather
-than handing out the raw ``DEEPGRAM_API_KEY`` (the reference implementation
-this was modeled on flagged that exact shortcut as a dev-only security gap
-in its own code comments).
+Three pieces (Live Voice Pipeline Replacement, Phases 1 & 3):
 
-Internal-secret gated like every other write/compute route (see ``app.py``'s
-``guarded`` list) — the web app is the only intended caller, proxying
-through ``apps/web/app/api/live/deepgram-token/route.ts``.
+- ``POST /api/live/deepgram-token`` — mints a short-lived, scoped Deepgram
+  token for the browser's direct STT WebSocket connection, rather than
+  handing out the raw ``DEEPGRAM_API_KEY``.
+- ``POST /api/live/tts`` — generates TTS audio bytes (Cartesia REST) for one
+  utterance; the browser fetches this per-utterance with its own
+  ``AbortController`` for barge-in (see ``InterviewSession``).
+- ``ws /api/live/session/{session_id}`` — the coordination WebSocket: the
+  browser forwards its own Deepgram-committed utterances here, and this
+  drives the ``live/orchestrator.py`` turn loop (real OpenAI tool-calling)
+  and pushes back what to speak next.
+
+``router`` (the two REST endpoints) is internal-secret gated like every
+other write/compute route, proxied through the web app
+(``apps/web/app/api/live/*/route.ts``) exactly like ``/api/coach/chat``.
+``ws_router`` (the WebSocket) is deliberately NOT — a browser's native
+WebSocket API cannot set custom headers, and Vercel's serverless functions
+don't proxy long-lived WebSockets, so the browser connects to this route on
+the agent-api DIRECTLY. It is capability-guarded by the session_id alone
+(unguessable uuid4), the same posture ``GET /api/session/{id}`` already
+uses for exactly this reason.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict
 
-from ..core.deps import build_deps
+from ..core.config import Settings
+from ..core.deps import Deps, build_deps
+from ..core.logging import get_logger
+from ..live import orchestrator as orch
+from ..live.guard import SessionGuard, wrap_up_line
+from ..live.orchestrator import CompleteFn, CompletionResult, LiveTurnSession, ToolCall
+from ..live.persistence import persist_and_score
+from ..live.state import InterviewUserdata
+
+log = get_logger(__name__)
 
 router = APIRouter()
+ws_router = APIRouter()
 
 _DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
 # Deepgram's grant endpoint's own default/max TTL differs by plan; 60s is
@@ -60,3 +87,181 @@ async def mint_deepgram_token() -> DeepgramTokenResponse:
     return DeepgramTokenResponse(
         access_token=data["access_token"], expires_in=data.get("expires_in", _TOKEN_TTL_SEC)
     )
+
+
+# --- TTS -----------------------------------------------------------------
+
+_CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
+_CARTESIA_VERSION = "2025-04-16"
+_MAX_TTS_TEXT_LEN = 2_000  # one spoken turn, generous; never a whole transcript
+
+
+class TtsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+
+@router.post("/api/live/tts")
+async def synthesize_tts(req: TtsRequest):
+    from fastapi import Response
+
+    settings = build_deps().settings
+    if not settings.cartesia_api_key:
+        raise HTTPException(status_code=503, detail="Cartesia TTS is not configured")
+    if len(req.text) > _MAX_TTS_TEXT_LEN:
+        raise HTTPException(status_code=413, detail="Text too long for one TTS call")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            _CARTESIA_TTS_URL,
+            headers={
+                "X-API-Key": settings.cartesia_api_key,
+                "Cartesia-Version": _CARTESIA_VERSION,
+                "Content-Type": "application/json",
+            },
+            json={
+                "model_id": "sonic-2",
+                "transcript": req.text,
+                "voice": {"mode": "id", "id": settings.cartesia_voice_id},
+                "output_format": {
+                    "container": "mp3",
+                    "bit_rate": 128000,
+                    "sample_rate": 44100,
+                },
+                "language": "en",
+            },
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cartesia TTS failed: {resp.status_code} {resp.text[:200]}",
+        )
+    return Response(content=resp.content, media_type="audio/mpeg")
+
+
+# --- coordination WebSocket -------------------------------------------------
+
+
+def _make_openai_complete_fn(settings: Settings) -> CompleteFn:
+    """Real OpenAI-backed CompleteFn (English-first v1 — see the rework
+    plan; a Gemini adapter is explicitly deferred)."""
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured; the live orchestrator needs it.")
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    model = settings.openai_model
+
+    async def complete(messages: list[dict], tools: list[dict]) -> CompletionResult:
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(model=model, messages=messages, tools=tools),
+            timeout=settings.llm_call_timeout_sec,
+        )
+        choice = resp.choices[0].message
+        tool_calls = [
+            ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments or "{}"))
+            for tc in (choice.tool_calls or [])
+        ]
+        return CompletionResult(content=choice.content, tool_calls=tool_calls)
+
+    return complete
+
+
+class _WsSessionFacade:
+    """Duck-types AgentSession's ``say``/``shutdown`` surface for
+    SessionGuard, unchanged from the LiveKit path. ``say`` pushes a "speak"
+    message to the client (mirroring how a turn reply is delivered);
+    ``shutdown`` closes the socket, which unblocks the main receive loop
+    (below) into its own persist+score path — SessionGuard itself has no
+    async close, so the actual WS close is scheduled as a background task.
+    """
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self._ws = websocket
+        self.ended = False
+
+    async def say(self, text: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._ws.send_json({"type": "speak", "text": text})
+
+    def shutdown(self, *, drain: bool = True) -> None:
+        self.ended = True
+        asyncio.create_task(self._close_quietly())
+
+    async def _close_quietly(self) -> None:
+        with contextlib.suppress(Exception):
+            await self._ws.close(code=1000)
+
+
+@ws_router.websocket("/api/live/session/{session_id}")
+async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
+    deps: Deps = build_deps()
+
+    view = await deps.repo.get_session_view(session_id)
+    if view is None or view.context is None:
+        await websocket.close(code=4404)
+        return
+
+    await websocket.accept()
+
+    ud = InterviewUserdata(ctx=view.context, session_id=session_id)
+    session = LiveTurnSession(ud=ud)
+    await deps.live_session_repo.put(session_id, session)
+
+    try:
+        complete_fn = _make_openai_complete_fn(deps.settings)
+    except RuntimeError as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1011)
+        return
+
+    facade = _WsSessionFacade(websocket)
+    lang_mode = view.context.plan.language_mode
+    guard = SessionGuard(
+        facade,
+        ud,
+        max_duration_sec=deps.settings.max_interview_duration_sec,
+        max_turns=deps.settings.max_interview_turns,
+        wrap_up_line=wrap_up_line(lang_mode.primary),
+    )
+
+    async def _shutdown_sequence() -> None:
+        await guard.aclose()
+        await persist_and_score(session_id, ud, deps)
+        await deps.live_session_repo.delete(session_id)
+
+    try:
+        opening = await orch.open_interview(session, complete_fn)
+        await websocket.send_json({"type": "speak", "text": opening.reply_text})
+        guard.start()
+
+        while not session.should_end and not facade.ended:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("type") != "utterance_end":
+                continue  # partial_transcript etc. — no server action in Phase 3
+            text = (msg.get("text") or "").strip()
+            if not text:
+                continue
+            result = await orch.run_turn(session, text, complete_fn)
+            if result.reply_text:
+                await websocket.send_json({"type": "speak", "text": result.reply_text})
+            if result.should_end:
+                break
+
+        # Loop exited because should_end flipped True (end_interview tool
+        # call), not because the client disconnected — explicitly close so
+        # the client gets a real close frame instead of a handler that just
+        # returns and leaves the connection hanging open with nothing more
+        # ever arriving.
+        if not facade.ended:
+            await websocket.close(code=1000)
+    except WebSocketDisconnect:
+        log.info("live: session %s disconnected", session_id)
+    except Exception:
+        log.exception("live: session %s WS handler error", session_id)
+    finally:
+        await _shutdown_sequence()

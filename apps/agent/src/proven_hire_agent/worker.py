@@ -772,89 +772,21 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_metrics(ev) -> None:
         usage_collector.collect(ev.metrics)
 
-    api_base = _api_base(settings)
-
-    async def _persist_via_api(has_answers: bool) -> bool:
-        """Persist the live result through the API process.
-
-        The worker runs in a SEPARATE process: with no Supabase configured the
-        API's in-memory repo is the canonical store, so writing through our own
-        ``deps.repo`` would land in a repo nobody reads (answers lost, never
-        scored). POST the result to the API instead; direct repo writes below
-        are the fallback for shared-store (Supabase) deployments.
-        """
-        import httpx
-
-        payload = {
-            "context": userdata.ctx.model_dump(),
-            "transcript": userdata.transcript,
-            "status": None if has_answers else "no_answers",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.post(
-                    f"{api_base}/api/session/{session_id}/live-result",
-                    json=payload,
-                    headers=_internal_headers(settings),
-                )
-            return resp.status_code == 200
-        except Exception:
-            log.exception("worker: live-result POST failed for %s", session_id)
-            return False
+    # Persist-on-shutdown + scoring-trigger logic now lives in
+    # live/persistence.py, shared with the new (Phase 3) WS-based
+    # orchestrator so this exists in exactly one place during the LiveKit ->
+    # custom-transport transition — see that module's docstring.
+    from .live.persistence import flush_checkpoint as _shared_flush_checkpoint
+    from .live.persistence import persist_and_score
 
     async def _flush_checkpoint(context, transcript: list[dict]) -> None:
-        """Off-path partial persist for the TranscriptFlusher (non-terminal).
-
-        Best-effort: any failure is swallowed by the flusher. Never marks the
-        session terminal — a checkpoint is a mid-interview snapshot, and the
-        live-result endpoint refuses writes once a session is terminal anyway.
-        """
-        import httpx
-
-        payload = {
-            "context": context.model_dump(),
-            "transcript": transcript,
-            "status": None,
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{api_base}/api/session/{session_id}/live-result",
-                json=payload,
-                headers=_internal_headers(settings),
-            )
+        await _shared_flush_checkpoint(session_id, context, transcript, settings)
 
     flusher = TranscriptFlusher(
         userdata,
         _flush_checkpoint,
         interval_sec=settings.transcript_flush_interval_sec,
     )
-
-    async def _persist_via_repo(has_answers: bool) -> bool:
-        """Direct-store fallback (correct when both processes share Supabase)."""
-        try:
-            await deps.repo.save_transcript(session_id, userdata.transcript)
-        except Exception:
-            log.exception("worker: save_transcript failed for %s", session_id)
-        try:
-            await deps.repo.save_context(session_id, userdata.ctx)
-        except Exception:
-            log.exception(
-                "worker: save_context FAILED for %s — answers not persisted; "
-                "skipping scoring to avoid a blank scorecard",
-                session_id,
-            )
-            # Mark errored so the report shows an honest message, not zeros.
-            try:
-                await deps.repo.update_status(session_id, "error")
-            except Exception:
-                log.exception("worker: update_status(error) failed for %s", session_id)
-            return False
-        if not has_answers:
-            try:
-                await deps.repo.update_status(session_id, "no_answers")
-            except Exception:
-                log.exception("worker: update_status(no_answers) failed for %s", session_id)
-        return True
 
     async def _on_shutdown() -> None:
         # Stop the checkpointer first so it can't race the final, authoritative
@@ -869,48 +801,7 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception:
             log.exception("worker: usage summary failed for %s", session_id)
 
-        # Recover answers the submit_answer tool never committed (model forgot to
-        # call it, or the candidate hung up mid-question) from the verbatim
-        # transcript — otherwise real answers are dropped and the session lands
-        # on "no_answers" with no report.
-        recovered = state.reconstruct_answers(userdata)
-        if recovered:
-            log.info(
-                "worker: session %s recovered %d answer(s) from transcript",
-                session_id,
-                recovered,
-            )
-
-        # An answer only counts if it has a non-empty transcript — a bare
-        # save_answer("") must not flip the session into the scoring path.
-        has_answers = any((a.transcript or "").strip() for a in userdata.ctx.answers)
-
-        # Persist BEFORE scoring; if nothing persisted, do NOT score (run_score
-        # would read the prep-time answer-less context -> blank card).
-        persisted = await _persist_via_api(has_answers)
-        if not persisted:
-            persisted = await _persist_via_repo(has_answers)
-        if not persisted or not has_answers:
-            if not has_answers:
-                log.info("worker: session %s has no answers; skipping scoring", session_id)
-            return
-
-        # Fire scoring (WP-7) best-effort; never block shutdown on it. The score
-        # endpoint runs the full LLM pipeline inline, so allow it minutes (a 10s
-        # ceiling would abandon nearly every real scoring run).
-        try:
-            import httpx
-
-            req = ScoreRequest(session_id=session_id)
-            score_timeout = httpx.Timeout(10.0, read=600.0)
-            async with httpx.AsyncClient(timeout=score_timeout) as client:
-                await client.post(
-                    f"{api_base}/api/score",
-                    json=req.model_dump(),
-                    headers=_internal_headers(settings),
-                )
-        except Exception:
-            log.exception("worker: scoring trigger failed for %s", session_id)
+        await persist_and_score(session_id, userdata, deps)
 
     ctx.add_shutdown_callback(_on_shutdown)
 

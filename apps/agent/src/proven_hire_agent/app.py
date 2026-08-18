@@ -39,6 +39,12 @@ def create_app() -> FastAPI:
     app.include_router(integrity_api.router, dependencies=guarded)
     app.include_router(proctoring_api.router, dependencies=guarded)
     app.include_router(live_api.router, dependencies=guarded)
+    # The coordination WebSocket is deliberately UNGATED: a browser's native
+    # WebSocket API can't set the X-Internal-Secret header, and Vercel can't
+    # proxy a long-lived WS, so the browser connects to this route directly —
+    # capability-guarded by the unguessable session_id, like session_api's
+    # read route below.
+    app.include_router(live_api.ws_router)
     app.include_router(session_api.router)
     return app
 
