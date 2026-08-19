@@ -24,6 +24,7 @@ Gemini-live adapter is explicitly deferred, not built here.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
@@ -435,7 +436,11 @@ async def _run_loop(session: LiveTurnSession, complete_fn: CompleteFn) -> TurnRe
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": tc.arguments},
+                        # OpenAI requires arguments to be a JSON-encoded STRING
+                        # in the message history, not a raw object — this is
+                        # the shape it echoes back to us on ToolCall.arguments,
+                        # but not the shape it accepts when we replay it.
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
                     }
                     for tc in result.tool_calls
                 ],
