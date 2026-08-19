@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
-import { isLiveKitConfigured, serverEnv } from "@/lib/env";
-import { createInterviewToken } from "@/lib/livekit";
+import { serverEnv } from "@/lib/env";
 import { SessionViewSchema, type SessionView } from "@/lib/session";
 import { InterviewRoomClient } from "@/components/interview-room/interview-room-client";
 
@@ -8,13 +7,11 @@ import { InterviewRoomClient } from "@/components/interview-room/interview-room-
 export const dynamic = "force-dynamic";
 
 /**
- * Token minting mirrors app/interview/[id]/page.tsx exactly: verify the
- * session exists with the agent, then mint a token pinned to that exact
- * room — never a client-supplied room name. `"prep"` is joinable (the token
- * just grants room access; the client's own polling gates the room UI
- * behind real questions actually being ready), matching the existing
- * pattern so a candidate isn't stuck waiting through two separate readiness
- * checks.
+ * The session id IS the capability (OSS, no-auth design): verify it exists
+ * with the agent before showing the room, same check the old LiveKit-token
+ * path used before minting — there's just nothing left to mint. The
+ * coordination WebSocket the room actually connects to is guarded the same
+ * way (capability-guarded by this same unguessable session_id).
  */
 async function loadSession(id: string): Promise<SessionView | null> {
   try {
@@ -28,6 +25,10 @@ async function loadSession(id: string): Promise<SessionView | null> {
   } catch {
     return null;
   }
+}
+
+function toWsUrl(httpUrl: string): string {
+  return httpUrl.replace(/^http/, "ws").replace(/\/$/, "");
 }
 
 export default async function InterviewRoomPage({
@@ -45,25 +46,8 @@ export default async function InterviewRoomPage({
   const experienceLabel =
     typeof sp.experience === "string" ? sp.experience : undefined;
 
-  let token: string | null = null;
-  let url: string | null = null;
-  if (isLiveKitConfigured()) {
-    // The session id IS the capability (OSS, no-auth design): verify it
-    // exists before minting, and pin the room to exactly this session id.
-    const session = await loadSession(session_id);
-    if (!session || session.session_id !== session_id) notFound();
-
-    const JOINABLE = new Set(["prep", "ready"]);
-    if (JOINABLE.has(session.status)) {
-      const minted = await createInterviewToken({
-        room: session.session_id,
-        identity: `dev-${session_id}`,
-        metadata: { session_id: session.session_id },
-      });
-      token = minted.token;
-      url = minted.url;
-    }
-  }
+  const session = await loadSession(session_id);
+  if (!session || session.session_id !== session_id) notFound();
 
   return (
     <InterviewRoomClient
@@ -71,8 +55,7 @@ export default async function InterviewRoomPage({
       candidateNameHint={candidateNameHint}
       roleHint={roleHint}
       experienceLabel={experienceLabel}
-      token={token}
-      url={url}
+      agentWsBaseUrl={toWsUrl(serverEnv.agentApiUrl)}
     />
   );
 }

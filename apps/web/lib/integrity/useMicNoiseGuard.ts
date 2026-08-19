@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useLocalParticipant } from "@livekit/components-react";
 import type { ReportViolation } from "./types";
 import { isActive } from "./types";
 import type { IntegrityRuleState } from "@proven-hire/shared";
@@ -12,9 +11,9 @@ import type { IntegrityRuleState } from "@proven-hire/shared";
  * above a loudness threshold for several consecutive seconds. This is
  * amplitude-only — it flags sustained loud background noise, not actual
  * multi-speaker diarization, which is a materially harder problem out of
- * scope for this pass. Reuses the LOCAL PARTICIPANT'S already-published mic
- * track (LiveKit's own for the voice interview) rather than requesting the
- * microphone a second time via a fresh getUserMedia call.
+ * scope for this pass. Takes the mic track as a parameter (owned by the
+ * room/session) rather than capturing its own — no second `getUserMedia`
+ * call, and no coupling to any particular transport.
  */
 const RMS_THRESHOLD = 0.35;
 const SUSTAINED_FRAMES = 45; // ~0.75s at rAF rate before it counts as a violation
@@ -23,13 +22,13 @@ const COOLDOWN_MS = 8000; // don't re-report while still loud
 export function useMicNoiseGuard(
   state: IntegrityRuleState | undefined,
   onViolation: ReportViolation,
+  track: MediaStreamTrack | null,
 ) {
   const enabled = isActive(state);
-  const { microphoneTrack } = useLocalParticipant();
   const lastReportRef = useRef(0);
 
   useEffect(() => {
-    const mediaStreamTrack = microphoneTrack?.track?.mediaStreamTrack;
+    const mediaStreamTrack = track;
     if (!enabled || !mediaStreamTrack) return;
 
     type WindowWithWebkit = Window & {
@@ -84,5 +83,5 @@ export function useMicNoiseGuard(
       cancelAnimationFrame(raf);
       ctx.close().catch(() => {});
     };
-  }, [enabled, microphoneTrack, onViolation]);
+  }, [enabled, track, onViolation]);
 }

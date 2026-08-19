@@ -1,23 +1,21 @@
 "use client";
 
 /**
- * Real RMS mic-energy (0..1) from the LOCAL participant's already-published
- * LiveKit mic track — same AnalyserNode technique as
- * `lib/integrity/useMicNoiseGuard.ts`, reused here purely for the AI orb's
- * visual amplitude while the candidate is expected to be speaking. No second
- * `getUserMedia` call; this taps the SAME track already flowing to the
- * agent, so the orb genuinely reacts to what's being said.
+ * Real RMS mic-energy (0..1) from a shared mic track — same AnalyserNode
+ * technique as `lib/integrity/useMicNoiseGuard.ts`, reused here purely for
+ * the AI orb's visual amplitude while the candidate is expected to be
+ * speaking. Takes the track as a parameter (owned by the room/session, e.g.
+ * InterviewSession.micTrack) rather than capturing its own — no second
+ * `getUserMedia` call, and no coupling to any particular transport.
  */
 
 import * as React from "react";
-import { useLocalParticipant } from "@livekit/components-react";
 
-export function useMicEnergy(active: boolean): number {
-  const { microphoneTrack } = useLocalParticipant();
+export function useMicEnergy(active: boolean, track: MediaStreamTrack | null): number {
   const [energy, setEnergy] = React.useState(0);
 
   React.useEffect(() => {
-    const mediaStreamTrack = microphoneTrack?.track?.mediaStreamTrack;
+    const mediaStreamTrack = track;
     if (!active || !mediaStreamTrack) {
       setEnergy(0);
       return;
@@ -58,7 +56,7 @@ export function useMicEnergy(active: boolean): number {
       cancelAnimationFrame(raf);
       ctx.close().catch(() => {});
     };
-  }, [active, microphoneTrack]);
+  }, [active, track]);
 
   return energy;
 }

@@ -293,7 +293,7 @@ function LiveSession({
     connectionState === ConnectionState.Reconnecting ||
     connectionState === ConnectionState.SignalReconnecting;
 
-  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+  const { localParticipant, isMicrophoneEnabled, microphoneTrack } = useLocalParticipant();
   const transcriptions = useTranscriptions();
   const { mergedProps: startAudioProps, canPlayAudio } = useStartAudio({
     props: {},
@@ -413,7 +413,11 @@ function LiveSession({
     needsFullscreen,
     requestFullscreen,
     cameraStatus,
-  } = useIntegrityMonitor(sessionId, onAutoEnd);
+  } = useIntegrityMonitor(
+    sessionId,
+    onAutoEnd,
+    microphoneTrack?.track?.mediaStreamTrack ?? null,
+  );
   const cameraRequired = integritySettings?.camera_required !== "off";
   const cameraUnavailable =
     cameraRequired &&

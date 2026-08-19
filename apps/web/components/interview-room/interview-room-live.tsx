@@ -98,7 +98,7 @@ export function InterviewRoomLive({
   const connectionState = useConnectionState();
   const connected = connectionState === ConnectionState.Connected;
 
-  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+  const { localParticipant, isMicrophoneEnabled, microphoneTrack } = useLocalParticipant();
   const { state: agentState } = useVoiceAssistant();
   const transcriptions = useTranscriptions();
   const { mergedProps: startAudioProps, canPlayAudio } = useStartAudio({
@@ -113,7 +113,8 @@ export function InterviewRoomLive({
         ? "candidate"
         : null;
 
-  const micEnergy = useMicEnergy(phase === "listening");
+  const micTrack = microphoneTrack?.track?.mediaStreamTrack ?? null;
+  const micEnergy = useMicEnergy(phase === "listening", micTrack);
   const { cameraOn, cameraStream, toggleCamera } = useCameraPreview();
 
   // Real STT output: the most recent finalized segment from the LOCAL
@@ -227,7 +228,7 @@ export function InterviewRoomLive({
     banned,
     needsFullscreen,
     requestFullscreen,
-  } = useIntegrityMonitor(sessionId, onAutoEnd);
+  } = useIntegrityMonitor(sessionId, onAutoEnd, micTrack);
 
   return (
     <>

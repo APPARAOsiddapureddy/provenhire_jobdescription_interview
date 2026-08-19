@@ -42,7 +42,11 @@ const BANNER_MS = 4500;
  * directly: the consumer renders a ban countdown modal (own timer) that
  * calls onAutoEnd when it completes, mirroring the fullscreen-exit modal.
  */
-export function useIntegrityMonitor(sessionId: string, onAutoEnd: () => void) {
+export function useIntegrityMonitor(
+  sessionId: string,
+  onAutoEnd: () => void,
+  micTrack: MediaStreamTrack | null,
+) {
   const [settings, setSettings] = useState<IntegritySettings | null>(null);
   const [banner, setBanner] = useState<IntegrityBanner | null>(null);
   const [banned, setBanned] = useState(false);
@@ -144,7 +148,7 @@ export function useIntegrityMonitor(sessionId: string, onAutoEnd: () => void) {
   useTabVisibilityGuard(gated("tab_switching_detection"), reportViolation);
   useDevtoolsGuard(gated("devtools_detection"), reportViolation);
   useCopyPasteGuard(gated("copy_paste_detection"), reportViolation);
-  useMicNoiseGuard(gated("microphone_monitoring"), reportViolation);
+  useMicNoiseGuard(gated("microphone_monitoring"), reportViolation, micTrack);
   // camera_required is a capability gate (like the mic), not a violation
   // rule — it isn't gated by the master switch, matching how mic access
   // itself isn't either; camera_ai_detection (the actual detector) is.

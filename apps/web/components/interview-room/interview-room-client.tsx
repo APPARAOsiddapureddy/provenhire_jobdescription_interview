@@ -5,38 +5,27 @@
  * pipeline, same `fetchSessionView` poller the existing /session/[id] prep
  * screen uses) into the interview room.
  *
- * Two paths, matching components/interview/live-room.tsx's established
- * split:
- *  • LIVE  (token && url, LiveKit configured): wraps <InterviewRoomLive> in
- *    <LiveKitRoom> — real STT, real agent voice, real mic control. This is
- *    the path that actually fixes "STT isn't happening": the room genuinely
- *    connects and captures audio now.
- *  • DEMO  (LiveKit not configured): falls back to the scripted
- *    useInterviewDemo walkthrough, so the screen still shows something
- *    coherent in an offline/no-keys build instead of being unusable.
+ * Custom transport only (Live Voice Pipeline Replacement, hard cutover): no
+ * LiveKit, no demo-fallback branch. The old fallback existed for "LiveKit
+ * isn't configured"; the new architecture has no equivalent client-visible
+ * config flag (Deepgram/OpenAI/Cartesia keys live only in the agent's own
+ * env, never exposed to the browser), so a misconfigured deployment now
+ * surfaces as a real connection error instead of silently degrading to a
+ * scripted walkthrough — matches deepgram-token/route.ts's own "no safe
+ * mock fallback" posture for this exact reason.
  *
  * Question text/progress/turn-history come from POLLING `GET
- * /api/session/{id}` in both paths (real `context.cursor` / `context.
- * answers`, updated server-side as the interview actually progresses) —
- * LiveKit's RoomMetadata only carries `session_id`, nothing per-question.
+ * /api/session/{id}` (real `context.cursor` / `context.answers`, updated
+ * server-side as the interview actually progresses) — the coordination WS
+ * carries no per-question state of its own.
  */
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import {
-  LiveKitRoom,
-  RoomAudioRenderer,
-} from "@livekit/components-react";
-import { DisconnectReason, MediaDeviceFailure } from "livekit-client";
 import { fetchSessionView, resetSessionPolling } from "@/lib/session";
 import type { ClientSessionView } from "@/lib/session";
-import {
-  InterviewRoomFloor,
-  type TurnHistoryEntry,
-} from "./interview-room-floor";
-import { InterviewRoomLive, describeMicFailure } from "./interview-room-live";
-import { useInterviewDemo, type DemoQuestion } from "./use-interview-demo";
-import { useCameraPreview } from "./use-camera-preview";
+import type { TurnHistoryEntry } from "./interview-room-floor";
+import { InterviewRoomLiveCustom } from "./interview-room-live-custom";
 import { PHButton, PHLogo } from "@/components/design-system";
 
 const STAGE_BY_SECTION: Record<string, string> = {
@@ -93,16 +82,15 @@ export function InterviewRoomClient({
   candidateNameHint,
   roleHint,
   experienceLabel,
-  token,
-  url,
+  agentWsBaseUrl,
 }: {
   sessionId: string;
   candidateNameHint: string;
   roleHint: string;
   experienceLabel?: string;
-  /** Null when LiveKit is unconfigured → falls back to the scripted demo. */
-  token: string | null;
-  url: string | null;
+  /** wss:// origin the browser connects the coordination WS to directly —
+   * derived server-side from AGENT_API_URL. */
+  agentWsBaseUrl: string;
 }) {
   const router = useRouter();
   const [view, setView] = React.useState<ClientSessionView | null>(null);
@@ -164,59 +152,19 @@ export function InterviewRoomClient({
   const role = view?.context?.job.title?.trim() || roleHint || "this role";
   const company = view?.context?.job.company_name || null;
 
-  const canConnect = Boolean(token && url);
-
-  // Guard the browser-only LiveKit client from SSR / first hydration —
-  // same reasoning as components/interview/live-room.tsx.
+  // Guard the browser-only InterviewSession from SSR / first hydration
+  // (getUserMedia/AudioContext/WebSocket don't exist server-side).
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
 
   const [connectionLost, setConnectionLost] = React.useState<string | null>(
     null,
   );
-  const [micFailureMsg, setMicFailureMsg] = React.useState<string | null>(
-    null,
-  );
   const [joinAttempt, setJoinAttempt] = React.useState(0);
 
-  const handleError = React.useCallback((error: Error) => {
-    const failure = MediaDeviceFailure.getFailure(error);
-    if (failure) return; // surfaced via the room's "Mic muted" pill instead
-    setConnectionLost(
-      "We couldn't reach the interview room. Check your network, then rejoin.",
-    );
+  const handleFatalError = React.useCallback((message: string) => {
+    setConnectionLost(message);
   }, []);
-
-  const handleDisconnected = React.useCallback(
-    (reason?: DisconnectReason) => {
-      if (reason === DisconnectReason.CLIENT_INITIATED) return;
-      if (reason === DisconnectReason.ROOM_DELETED) {
-        router.push(`/report/${encodeURIComponent(sessionId)}`);
-        return;
-      }
-      setConnectionLost(
-        "The connection to the interview dropped. Rejoin to pick up where you left off.",
-      );
-    },
-    [router, sessionId],
-  );
-
-  // --- DEMO fallback path (LiveKit not configured) ---------------------
-  const demoQuestions: DemoQuestion[] = React.useMemo(() => {
-    if (!view?.context) return [];
-    return view.context.plan.questions.map((q) => ({
-      id: q.id,
-      text: q.text.en ?? "",
-      stageLabel: STAGE_BY_SECTION[q.section] ?? "Role Fit",
-    }));
-  }, [view]);
-  const { cameraOn, cameraStream, toggleCamera } = useCameraPreview();
-  const onFinish = React.useCallback(() => {
-    router.push(`/report/${encodeURIComponent(sessionId)}`);
-  }, [router, sessionId]);
-  const demo = useInterviewDemo(demoQuestions, onFinish);
-  const [historyOpen, setHistoryOpen] = React.useState(true);
-  const [fullTranscriptMode, setFullTranscriptMode] = React.useState(false);
 
   if (failed) {
     return (
@@ -272,120 +220,30 @@ export function InterviewRoomClient({
     );
   }
 
-  if (canConnect) {
-    if (!mounted) {
-      return (
-        <LoadingScaffold>
-          <p className="text-[16px] font-medium text-white">Connecting…</p>
-        </LoadingScaffold>
-      );
-    }
-    return (
-      <LiveKitRoom
-        key={joinAttempt}
-        serverUrl={url ?? undefined}
-        token={token ?? undefined}
-        connect
-        audio
-        video={false}
-        data-session={sessionId}
-        onError={handleError}
-        onMediaDeviceFailure={(failure) => {
-          // Mic capture failed (permission denied / no device / device busy).
-          // The room's "Mic muted" pill shows the state but has no fix built
-          // in, so without this the candidate is stuck seeing questions with
-          // no way to answer and no explanation why.
-          setMicFailureMsg(describeMicFailure(failure));
-        }}
-        onDisconnected={handleDisconnected}
-      >
-        <RoomAudioRenderer />
-        {micFailureMsg && (
-          <div
-            role="alert"
-            className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-4 bg-[#3a1010] px-6 py-3 text-center text-[13px] text-white shadow-lg"
-          >
-            <span>{micFailureMsg}</span>
-            <PHButton
-              variant="secondary"
-              onClick={() => {
-                setMicFailureMsg(null);
-                setJoinAttempt((n) => n + 1);
-              }}
-            >
-              Try again
-            </PHButton>
-          </div>
-        )}
-        <InterviewRoomLive
-          sessionId={sessionId}
-          candidateName={candidateName}
-          candidateInitials={initialsOf(candidateName)}
-          role={role}
-          company={company}
-          experienceLabel={experienceLabel}
-          stageLabel={stageLabel}
-          questionText={currentQuestion?.text.en ?? ""}
-          questionIndex={cursor}
-          totalQuestions={planQuestions.length}
-          turnHistory={turnHistory}
-        />
-      </LiveKitRoom>
-    );
-  }
-
-  // LiveKit isn't configured — scripted demo walkthrough (offline-friendly
-  // fallback, same philosophy as live-room.tsx's PreviewSession).
-  if (demoQuestions.length === 0) {
+  if (!mounted) {
     return (
       <LoadingScaffold>
-        <p className="text-[16px] font-medium text-white">
-          Preparing your interview…
-        </p>
+        <p className="text-[16px] font-medium text-white">Connecting…</p>
       </LoadingScaffold>
     );
   }
 
   return (
-    <InterviewRoomFloor
+    <InterviewRoomLiveCustom
+      key={joinAttempt}
+      sessionId={sessionId}
+      agentWsBaseUrl={agentWsBaseUrl}
       candidateName={candidateName}
       candidateInitials={initialsOf(candidateName)}
       role={role}
       company={company}
       experienceLabel={experienceLabel}
-      stageLabel={demo.stageLabel}
-      phase={demo.phase}
-      floorOwner={demo.floorOwner}
-      questionIndex={demo.questionIndex}
-      totalQuestions={demo.totalQuestions}
-      questionText={demo.questionText}
-      transcriptText=""
-      transcriptOpen={demo.transcriptOpen}
-      onToggleTranscript={demo.toggleTranscript}
-      micEnergy={demo.micEnergy}
-      micReady
-      cameraOn={cameraOn}
-      cameraStream={cameraStream}
-      onToggleCamera={() => void toggleCamera()}
-      historyOpen={historyOpen}
-      onToggleHistory={() => setHistoryOpen((v) => !v)}
-      fullTranscriptMode={fullTranscriptMode}
-      onToggleFullTranscript={() => setFullTranscriptMode((v) => !v)}
-      turnHistory={demo.turnHistory}
-      pauseCount={demo.pauseCount}
-      pauseMax={demo.pauseMax}
-      onRequestPause={demo.requestPause}
-      onRepeatQuestion={demo.repeatQuestion}
-      onEndInterview={demo.requestEnd}
-      ending={demo.ending}
-      showCountdown={demo.showCountdown}
-      countdownValue={demo.countdownValue}
-      showConfirmEnd={demo.showConfirmEnd}
-      onConfirmEnd={demo.confirmEnd}
-      onCancelEnd={demo.cancelEnd}
-      showPaused={demo.showPaused}
-      onContinueFromPause={demo.continueFromPause}
-      showClosing={demo.showClosing}
+      stageLabel={stageLabel}
+      questionText={currentQuestion?.text.en ?? ""}
+      questionIndex={cursor}
+      totalQuestions={planQuestions.length}
+      turnHistory={turnHistory}
+      onFatalError={handleFatalError}
     />
   );
 }
