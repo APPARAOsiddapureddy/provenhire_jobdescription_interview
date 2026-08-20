@@ -281,11 +281,15 @@ class _RoundQuestions(BaseModel):
     questions: list[PlannedQuestion]
 
 
-# Fixed per-round question counts for the ~40-45 min interview tier: 1 intro +
-# 6 weighted-technical + 1 wrap from the general round, 1 from coding, 3 from
-# behavioral = 12 total, matching the reference docs' own trimmed proposals.
-_GENERAL_TECHNICAL_COUNT = 6
-_BEHAVIORAL_COUNT = 3
+# Fixed per-round question counts: 1 intro + 8 weighted-technical + 1 wrap
+# from the general round, 1 from coding, 4 from behavioral = 15 total (was
+# 12). Raised alongside the shorter-question prompt rules below: real
+# candidates hearing (not reading) a question can't hold a long compound ask
+# in their head, so questions are now shorter/single-focus, which means more
+# of them fit in the same real-world session time. Unreached tail questions
+# are harmless (same as before) if the session hits its time limit first.
+_GENERAL_TECHNICAL_COUNT = 8
+_BEHAVIORAL_COUNT = 4
 _TIME_BUDGET_MIN = 40
 _SECTION_ORDER: tuple[str, ...] = ("intro", "behavioral", "technical", "coding", "wrap")
 
