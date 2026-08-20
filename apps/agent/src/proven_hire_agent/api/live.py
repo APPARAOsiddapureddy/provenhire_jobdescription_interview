@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 
 import httpx
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -141,20 +142,87 @@ async def synthesize_tts(req: TtsRequest):
 
 # --- coordination WebSocket -------------------------------------------------
 
+# gpt-oss models generate internally using OpenAI's "Harmony" response format
+# (channel-tagged: an "analysis" reasoning channel, a "final" answer channel).
+# A known issue across MULTIPLE inference backends (vLLM, SGLang — not
+# specific to one provider) is that the OpenAI-compatible endpoint doesn't
+# always fully strip Harmony's own markup, leaking either full tag sequences
+# (``<|channel|>final<|message|>``) or just the bare channel name glued
+# directly onto the real reply (observed live: "finalSure, Alex..."). More
+# likely under long system prompts — which this project's interview
+# instructions are. Only relevant when live_llm_provider is a gpt-oss host
+# (cerebras/groq/together); harmless no-op against OpenAI's own API.
+# The "analysis" channel is the model's private reasoning/scratchpad — when
+# it leaks it can be several sentences of plain prose (observed live, e.g.
+# "We have the follow-up signal indicating we should move on... So we
+# proceed to next turn awaiting answer.assistantfinalGot it. Could you..."),
+# not just stray tags, so this can't be caught by matching tag syntax alone.
+# Empirically the real reply consistently starts right after the LAST
+# occurrence of a "final" (optionally "assistantfinal") marker immediately
+# followed by an uppercase letter — whatever led up to it, tagged or not, is
+# the leaked reasoning and must never reach TTS. Greedy .* naturally finds
+# the RIGHTMOST such marker (regex backtracks from the end of the string).
+_HARMONY_TAG_RE = re.compile(r"<\|[a-zA-Z_]+\|>")
+_HARMONY_REASONING_PREFIX_RE = re.compile(r"^.*(?:assistant)?final(?=[A-Z])", re.DOTALL)
+
+
+def _clean_harmony_leak(text: str | None) -> str | None:
+    if not text:
+        return text
+    cleaned = _HARMONY_TAG_RE.sub("", text)
+    cleaned = _HARMONY_REASONING_PREFIX_RE.sub("", cleaned)
+    return cleaned.strip()
+
 
 def _make_openai_complete_fn(settings: Settings) -> CompleteFn:
-    """Real OpenAI-backed CompleteFn (English-first v1 — see the rework
-    plan; a Gemini adapter is explicitly deferred)."""
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured; the live orchestrator needs it.")
+    """Real CompleteFn for the live orchestrator (English-first v1 — see the
+    rework plan; a Gemini adapter is explicitly deferred).
+
+    Backend selectable via ``settings.live_llm_provider`` — "openai" (default),
+    "cerebras", "groq", or "together". The three alternates are OpenAI-API-
+    compatible fast/cheap inference providers (same SDK, same tool-calling
+    shape, just a ``base_url``/key/model swap) measured materially faster for
+    this specific tool-calling loop (~7-9s -> ~2-3s per turn) at much lower
+    cost, hence the default-off opt-in rather than replacing OpenAI outright.
+    Three alternates are wired in because account-activation issues (billing
+    holds, signup fraud flags) turned out to be the real obstacle in
+    practice, not model/API availability.
+    """
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    model = settings.openai_model
+    provider = (settings.live_llm_provider or "openai").lower()
+    # gpt-oss's reasoning_effort trades reasoning depth for latency (and,
+    # empirically, fewer malformed Harmony-format leaks — see
+    # _clean_harmony_leak above) — "low" fits a real-time voice loop where
+    # snappy turn-taking matters more than deep chain-of-thought. Only
+    # meaningful for gpt-oss hosts; omitted for OpenAI's own API.
+    extra_body: dict = {"reasoning_effort": "low"} if provider in {"cerebras", "groq", "together"} else {}
+    if provider == "cerebras":
+        if not settings.cerebras_api_key:
+            raise RuntimeError("CEREBRAS_API_KEY is not configured; the live orchestrator needs it.")
+        client = AsyncOpenAI(api_key=settings.cerebras_api_key, base_url=settings.cerebras_base_url)
+        model = settings.cerebras_model
+    elif provider == "groq":
+        if not settings.groq_api_key:
+            raise RuntimeError("GROQ_API_KEY is not configured; the live orchestrator needs it.")
+        client = AsyncOpenAI(api_key=settings.groq_api_key, base_url=settings.groq_base_url)
+        model = settings.groq_model
+    elif provider == "together":
+        if not settings.together_api_key:
+            raise RuntimeError("TOGETHER_API_KEY is not configured; the live orchestrator needs it.")
+        client = AsyncOpenAI(api_key=settings.together_api_key, base_url=settings.together_base_url)
+        model = settings.together_model
+    else:
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured; the live orchestrator needs it.")
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        model = settings.openai_model
 
     async def complete(messages: list[dict], tools: list[dict]) -> CompletionResult:
         resp = await asyncio.wait_for(
-            client.chat.completions.create(model=model, messages=messages, tools=tools),
+            client.chat.completions.create(
+                model=model, messages=messages, tools=tools, extra_body=extra_body
+            ),
             timeout=settings.llm_call_timeout_sec,
         )
         choice = resp.choices[0].message
@@ -162,7 +230,7 @@ def _make_openai_complete_fn(settings: Settings) -> CompleteFn:
             ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments or "{}"))
             for tc in (choice.tool_calls or [])
         ]
-        return CompletionResult(content=choice.content, tool_calls=tool_calls)
+        return CompletionResult(content=_clean_harmony_leak(choice.content), tool_calls=tool_calls)
 
     return complete
 

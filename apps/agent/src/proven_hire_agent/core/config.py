@@ -44,6 +44,36 @@ class Settings(BaseSettings):
     # the exact id + structured-output support before wiring billing (project
     # golden rule #6). Env-overridable via OPENAI_MODEL.
     openai_model: str = "gpt-5.1-mini"
+    # Which backend drives the LIVE orchestrator's tool-calling loop
+    # specifically (independent of llm_provider, which is prep/scoring only —
+    # same "separate live tier" split as gemini_model_live above).
+    # "openai" | "cerebras" | "groq" | "together". All three alternates are
+    # OpenAI-API-compatible fast/cheap inference providers hosting gpt-oss-120b
+    # with verified native tool-calling support (each's own docs) — chosen
+    # over frontier models for materially lower measured latency on this loop
+    # (~7-9s -> ~2-3s per turn) and much lower cost. Multiple options exist
+    # here because account-activation issues (billing holds, signup fraud
+    # flags) turned out to be the real blocker in practice, not model
+    # availability — override via LIVE_LLM_PROVIDER.
+    live_llm_provider: str = "openai"
+    # Cerebras Inference — verified OpenAI-compatible /v1/chat/completions,
+    # verified gpt-oss-120b supports native tool calling. gemma-4-31b is also
+    # hosted there but its tool-calling support is unconfirmed — don't switch
+    # the live path to it without re-verifying. Override via CEREBRAS_MODEL /
+    # CEREBRAS_BASE_URL.
+    cerebras_model: str = "gpt-oss-120b"
+    cerebras_base_url: str = "https://api.cerebras.ai/v1"
+    # GroqCloud — same value proposition as Cerebras (custom silicon, very
+    # fast open-weight inference), verified OpenAI-compatible endpoint and
+    # native tool-calling support for both gpt-oss-120b AND gpt-oss-20b (the
+    # latter isn't offered on Cerebras). Override via GROQ_MODEL /
+    # GROQ_BASE_URL.
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    # Together AI — verified OpenAI-compatible endpoint, verified gpt-oss-120b
+    # supports tools/tool_choice. Override via TOGETHER_MODEL / TOGETHER_BASE_URL.
+    together_model: str = "openai/gpt-oss-120b"
+    together_base_url: str = "https://api.together.ai/v1"
     # ElevenLabs TTS model — the low-latency multilingual voice for languages
     # Cartesia can't speak (e.g. Vietnamese). eleven_flash_v2_5 is ~75ms-latency
     # and covers 32 languages incl. vi. Override via ELEVENLABS_MODEL.
@@ -112,6 +142,9 @@ class Settings(BaseSettings):
     # --- provider credentials (all optional) ---------------------------------
     gemini_api_key: str | None = None
     openai_api_key: str | None = None
+    cerebras_api_key: str | None = None
+    groq_api_key: str | None = None
+    together_api_key: str | None = None
     soniox_api_key: str | None = None
     deepgram_api_key: str | None = None
     cartesia_api_key: str | None = None
