@@ -64,6 +64,10 @@ export interface InterviewSessionOptions {
   onAudioBlocked?: () => void;
 }
 
+/** Distinguishes "couldn't get a token" from "token was fine, WS wouldn't
+ * open" purely for the error message text — see connectDeepgram(). */
+class DeepgramTokenError extends Error {}
+
 const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
 const CONNECT_TIMEOUT_MS = 8000;
 const UTTERANCE_SAFETY_TIMEOUT_MS = 30_000;
@@ -236,45 +240,16 @@ export class InterviewSession {
   }
 
   private async connectTransports(): Promise<void> {
-    let token: string;
     try {
-      const res = await fetch("/api/live/deepgram-token", { method: "POST" });
-      if (!res.ok) throw new Error(`token endpoint returned ${res.status}`);
-      const json = (await res.json()) as { access_token: string };
-      token = json.access_token;
+      await this.connectDeepgram();
     } catch (err) {
-      this.emitError("deepgram_connect_failed", "Could not obtain a voice session token.", err);
+      const message =
+        err instanceof DeepgramTokenError
+          ? "Could not obtain a voice session token."
+          : "Could not connect to the speech-to-text service.";
+      this.emitError("deepgram_connect_failed", message, err);
       throw err;
     }
-
-    // Sec-WebSocket-Protocol auth, NOT a query param: empirically verified
-    // against the real Deepgram API (Aug 2026) — ?access_token=<grant JWT>
-    // was rejected with a hard 401 "Invalid credentials" every time (not an
-    // expiry issue; confirmed with tokens used within ~1s of minting).
-    // Sec-WebSocket-Protocol: ["bearer", <JWT>] connects successfully; the
-    // "token" subprotocol label (used for raw API keys) also 401s for a
-    // grant JWT — it specifically needs the "bearer" label.
-    const dgUrl = new URL(DEEPGRAM_WS_URL);
-    dgUrl.searchParams.set("model", "nova-3");
-    dgUrl.searchParams.set("language", "en"); // English-first v1 — see the rework plan
-    dgUrl.searchParams.set("encoding", "linear16");
-    dgUrl.searchParams.set("sample_rate", String(SAMPLE_RATE));
-    dgUrl.searchParams.set("channels", "1");
-    dgUrl.searchParams.set("interim_results", "true");
-    dgUrl.searchParams.set("vad_events", "true");
-    dgUrl.searchParams.set("endpointing", "1500");
-    dgUrl.searchParams.set("utterance_end_ms", "2800");
-
-    try {
-      this.deepgramWs = await openWebSocket(dgUrl.toString(), ["bearer", token]);
-    } catch (err) {
-      this.emitError("deepgram_connect_failed", "Could not connect to the speech-to-text service.", err);
-      throw err;
-    }
-    this.deepgramWs.addEventListener("message", (ev) => this.handleDeepgramMessage(ev));
-    this.deepgramWs.addEventListener("close", () => {
-      if (!this.closed) this.emitError("deepgram_connect_failed", "Speech-to-text connection closed unexpectedly.");
-    });
 
     const coordUrl = `${this.agentWsBaseUrl.replace(/\/$/, "")}/api/live/session/${encodeURIComponent(this.sessionId)}`;
     try {
@@ -314,6 +289,85 @@ export class InterviewSession {
       }
     };
     source.connect(this.workletNode);
+  }
+
+  /** Mint a fresh token and open the Deepgram WS. Throws on failure — never
+   * emits an error itself, since the SAME failure means something different
+   * to each caller: fatal on the very first connect, just "try again" during
+   * reconnectDeepgram()'s retry budget. Callers decide. */
+  private async connectDeepgram(): Promise<void> {
+    let token: string;
+    try {
+      const res = await fetch("/api/live/deepgram-token", { method: "POST" });
+      if (!res.ok) throw new DeepgramTokenError(`token endpoint returned ${res.status}`);
+      const json = (await res.json()) as { access_token: string };
+      token = json.access_token;
+    } catch (err) {
+      throw err instanceof DeepgramTokenError ? err : new DeepgramTokenError(String(err));
+    }
+
+    // Sec-WebSocket-Protocol auth, NOT a query param: empirically verified
+    // against the real Deepgram API (Aug 2026) — ?access_token=<grant JWT>
+    // was rejected with a hard 401 "Invalid credentials" every time (not an
+    // expiry issue; confirmed with tokens used within ~1s of minting).
+    // Sec-WebSocket-Protocol: ["bearer", <JWT>] connects successfully; the
+    // "token" subprotocol label (used for raw API keys) also 401s for a
+    // grant JWT — it specifically needs the "bearer" label.
+    const dgUrl = new URL(DEEPGRAM_WS_URL);
+    dgUrl.searchParams.set("model", "nova-3");
+    dgUrl.searchParams.set("language", "en"); // English-first v1 — see the rework plan
+    dgUrl.searchParams.set("encoding", "linear16");
+    dgUrl.searchParams.set("sample_rate", String(SAMPLE_RATE));
+    dgUrl.searchParams.set("channels", "1");
+    dgUrl.searchParams.set("interim_results", "true");
+    dgUrl.searchParams.set("vad_events", "true");
+    dgUrl.searchParams.set("endpointing", "1500");
+    dgUrl.searchParams.set("utterance_end_ms", "2800");
+
+    const ws = await openWebSocket(dgUrl.toString(), ["bearer", token]);
+    ws.addEventListener("message", (ev) => this.handleDeepgramMessage(ev));
+    ws.addEventListener("close", () => this.onDeepgramClosed(ws));
+    this.deepgramWs = ws;
+  }
+
+  /** A real-world Deepgram WS can drop mid-interview for reasons that have
+   * nothing to do with the interview itself — a network blip, a backgrounded
+   * browser tab throttling timers, a transient upstream hiccup. Treating
+   * that as instantly fatal (the original behavior) ends a perfectly
+   * recoverable interview over a hiccup in ONE of three connections. Retry
+   * a few times with backoff before actually giving up. */
+  private deepgramReconnectAttempt = 0;
+  private static readonly MAX_DEEPGRAM_RECONNECT_ATTEMPTS = 4;
+
+  private onDeepgramClosed(closedWs: WebSocket): void {
+    // Ignore close events from a socket we've already superseded (a stale
+    // listener from a previous connectDeepgram() call) or our own teardown.
+    if (this.closed || this.deepgramWs !== closedWs) return;
+    void this.reconnectDeepgram();
+  }
+
+  private async reconnectDeepgram(): Promise<void> {
+    if (this.closed) return;
+    this.deepgramReconnectAttempt += 1;
+    if (this.deepgramReconnectAttempt > InterviewSession.MAX_DEEPGRAM_RECONNECT_ATTEMPTS) {
+      this.emitError(
+        "deepgram_connect_failed",
+        "Speech-to-text connection closed unexpectedly.",
+      );
+      return;
+    }
+    const backoffMs = 500 * 2 ** (this.deepgramReconnectAttempt - 1); // 0.5s, 1s, 2s, 4s
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    if (this.closed) return;
+    try {
+      await this.connectDeepgram();
+      this.deepgramReconnectAttempt = 0; // back to healthy — reset the budget
+    } catch {
+      // connectDeepgram() never emits on its own — silently try again up to
+      // the attempt budget above, which is what actually surfaces a fatal
+      // error once retries are exhausted.
+      void this.reconnectDeepgram();
+    }
   }
 
   // --- Deepgram STT event handling ---------------------------------------
