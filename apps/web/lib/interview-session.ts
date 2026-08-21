@@ -45,6 +45,15 @@ export interface InterviewSessionOptions {
   /** Candidate's own live STT text — interim (isFinal=false) or committed
    * (isFinal=true) for the current in-progress utterance. */
   onTranscript?: (text: string, isFinal: boolean) => void;
+  /** Fired with the EXACT text the AI is about to speak, every time a new
+   * "speak" message arrives. This is what the model actually says — which
+   * is very often a paraphrase of the planned question, or an improvised
+   * follow-up not in the plan at all — so the room should show THIS as the
+   * current question, not a separately-polled plan snapshot. Polling
+   * GET /api/session/{id} for questionText caused a real, confusing bug:
+   * the display and the live audio would silently diverge as soon as the
+   * model paraphrased or asked a follow-up. */
+  onQuestionText?: (text: string) => void;
   onError?: (error: InterviewSessionError) => void;
   /** Fired once the server has ended the interview and the goodbye line (if
    * any) has finished playing. */
@@ -117,6 +126,7 @@ export class InterviewSession {
   private readonly agentWsBaseUrl: string;
   private readonly onFloorChange?: (state: FloorState) => void;
   private readonly onTranscript?: (text: string, isFinal: boolean) => void;
+  private readonly onQuestionText?: (text: string) => void;
   private readonly onError?: (error: InterviewSessionError) => void;
   private readonly onEnded?: () => void;
   private readonly onAudioBlocked?: () => void;
@@ -148,6 +158,7 @@ export class InterviewSession {
     this.agentWsBaseUrl = options.agentWsBaseUrl;
     this.onFloorChange = options.onFloorChange;
     this.onTranscript = options.onTranscript;
+    this.onQuestionText = options.onQuestionText;
     this.onError = options.onError;
     this.onEnded = options.onEnded;
     this.onAudioBlocked = options.onAudioBlocked;
@@ -479,6 +490,7 @@ export class InterviewSession {
 
   private async speak(text: string): Promise<void> {
     this.lastAiText = text;
+    this.onQuestionText?.(text);
     this.setFloor("AI_THINKING");
 
     const controller = new AbortController();

@@ -98,6 +98,12 @@ export function InterviewRoomLiveCustom({
 
   const [floor, setFloor] = React.useState<FloorState>("IDLE");
   const [transcriptText, setTranscriptText] = React.useState("");
+  // What the AI is ACTUALLY saying, from the coordination WS's own "speak"
+  // messages — not the polled plan snapshot. The model routinely paraphrases
+  // the planned question or asks an improvised follow-up, so the polled
+  // plan text and the live audio would silently diverge; this stays exactly
+  // in sync with what the candidate hears, no polling lag either.
+  const [liveQuestionText, setLiveQuestionText] = React.useState("");
   const [micTrack, setMicTrack] = React.useState<MediaStreamTrack | null>(null);
   const [micReady, setMicReady] = React.useState(false);
   const [canPlayAudio, setCanPlayAudio] = React.useState(true);
@@ -130,6 +136,9 @@ export function InterviewRoomLiveCustom({
       },
       onTranscript: (text) => {
         if (!cancelled) setTranscriptText(text);
+      },
+      onQuestionText: (text) => {
+        if (!cancelled) setLiveQuestionText(text);
       },
       onAudioBlocked: () => {
         if (!cancelled) setCanPlayAudio(false);
@@ -301,7 +310,7 @@ export function InterviewRoomLiveCustom({
         floorOwner={floorOwner}
         questionIndex={questionIndex}
         totalQuestions={totalQuestions}
-        questionText={questionText}
+        questionText={liveQuestionText || questionText}
         transcriptText={transcriptText}
         transcriptOpen={transcriptOpen}
         onToggleTranscript={() => setTranscriptOpen((v) => !v)}
