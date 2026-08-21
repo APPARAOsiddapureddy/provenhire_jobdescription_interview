@@ -55,6 +55,16 @@ async def _no_op_trigger_scoring(session_id, settings) -> None:
     return None
 
 
+async def _no_op_flush_checkpoint(session_id, context, transcript, settings) -> None:
+    """Same rationale as _fast_fail_persist_via_api — the per-turn checkpoint
+    also makes a real httpx call that hangs the same way here. Patched on
+    live_api directly (not live_persistence) because live.py does
+    ``from ..live.persistence import flush_checkpoint``, which binds its own
+    name in live_api's namespace at import time; patching the origin module
+    doesn't reach that already-bound reference."""
+    return None
+
+
 def test_ws_rejects_unknown_session() -> None:
     client = TestClient(app)
     try:
@@ -96,6 +106,7 @@ def test_ws_completes_one_full_turn_end_to_end(monkeypatch) -> None:
     monkeypatch.setattr(live_api, "_make_openai_complete_fn", fake_make_complete_fn)
     monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
     monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
 
     client = TestClient(app)
     with client.websocket_connect(f"/api/live/session/{session_id}") as ws:
@@ -158,6 +169,7 @@ def test_ws_end_interview_tool_call_closes_the_socket(monkeypatch) -> None:
     monkeypatch.setattr(live_api, "_make_openai_complete_fn", fake_make_complete_fn)
     monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
     monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
 
     client = TestClient(app)
     with client.websocket_connect(f"/api/live/session/{session_id}") as ws:

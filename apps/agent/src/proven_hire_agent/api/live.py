@@ -41,7 +41,7 @@ from ..core.logging import get_logger
 from ..live import orchestrator as orch
 from ..live.guard import SessionGuard, wrap_up_line
 from ..live.orchestrator import CompleteFn, CompletionResult, LiveTurnSession, ToolCall
-from ..live.persistence import persist_and_score
+from ..live.persistence import flush_checkpoint, persist_and_score
 from ..live.state import InterviewUserdata
 
 log = get_logger(__name__)
@@ -317,6 +317,14 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
             result = await orch.run_turn(session, text, complete_fn)
             if result.reply_text:
                 await websocket.send_json({"type": "speak", "text": result.reply_text})
+            # Off-path checkpoint so GET /api/session/{id} (which the room UI
+            # polls for questionText/cursor/turn history) reflects progress
+            # DURING the interview, not just once it ends — without this the
+            # candidate hears new questions but the UI never advances past
+            # question 1 until the whole session shuts down. Best-effort:
+            # never let a flaky checkpoint POST break the live turn loop.
+            with contextlib.suppress(Exception):
+                await flush_checkpoint(session_id, ud.ctx, ud.transcript, deps.settings)
             if result.should_end:
                 break
 
