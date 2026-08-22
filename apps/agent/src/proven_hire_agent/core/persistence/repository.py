@@ -6,6 +6,22 @@ singleton so a session written during ``POST /api/prep`` is visible to later
 reads in the same process). :class:`SupabaseRepository` persists to the
 ``public.sessions`` table (see ``supabase/migrations/0001_init.sql``) and
 lazy-imports the ``supabase`` SDK.
+
+``version`` (``supabase/migrations/0009_session_version.sql``) is an
+optimistic-concurrency counter, added for the live-interview backend hardening
+plan. Only :meth:`SessionRepository.save_live_result` is version-aware — every
+other write method here is UNCHANGED, unconditional-overwrite behavior,
+preserved deliberately: retrofitting every write path (prep, scoring, the
+LiveKit worker) with caller-tracked versions would be a sprawling, high-risk
+change for problem that's specific to ONE path (two WS connections racing on
+the same live-interview session). ``save_live_result`` covers exactly that
+path — it's what both ``api/session.py``'s ``post_live_result`` route and
+``live/persistence.py``'s in-process fallback call, replacing what used to be
+2-3 separate unconditional writes plus a route-level, TOCTOU-racy terminal-
+status check. Passing ``expected_version=None`` reproduces the OLD
+unconditional-overwrite behavior exactly (still gated on the session not
+already being terminal) — this is what the LiveKit worker path keeps doing,
+unchanged; the new WS transport is the one that supplies a real version.
 """
 
 from __future__ import annotations
@@ -17,11 +33,20 @@ from uuid import uuid4
 from ...api.views import SessionView
 from ...shared_models import AnswerRecord, InterviewContext, PrepRequest, ScoreCard
 from ..logging import get_logger
+from ..session_status import ALLOWED_LIVE_STATUSES, TERMINAL_STATUSES
 
 if TYPE_CHECKING:
     from ..config import Settings
 
 log = get_logger(__name__)
+
+# Bounded retry budget for the internal optimistic-retry read-modify-write
+# methods (append_answer/mark_progress/add_warnings) — these race INSIDE one
+# method call (read, mutate in Python, write back), independent of and in
+# addition to save_live_result's caller-supplied version check. A handful of
+# attempts is enough to ride out a genuine concurrent writer without risking
+# a real infinite loop on a persistently-broken connection.
+_INTERNAL_RETRY_ATTEMPTS = 5
 
 
 def _new_session_id() -> str:
@@ -54,6 +79,31 @@ class SessionRepository(Protocol):
 
     async def get_session_view(self, session_id: str) -> SessionView | None: ...
 
+    async def save_live_result(
+        self,
+        session_id: str,
+        *,
+        context: InterviewContext,
+        transcript: list[dict] | None = None,
+        status: str | None = None,
+        expected_version: int | None = None,
+    ) -> int | None:
+        """Atomically persist a live-interview write-back.
+
+        Replaces the read-then-write-then-write-then-write sequence both
+        ``api/session.py``'s route and ``live/persistence.py``'s in-process
+        fallback used to do by hand. Returns the NEW version on success, or
+        ``None`` if the write was rejected — either the session has already
+        reached a terminal status (complete/no_answers/error/rejected), the
+        supplied ``status`` isn't a legal live-result value, the session is
+        unknown, or ``expected_version`` was supplied and didn't match the
+        session's current version (a stale or second writer). ``None`` for
+        ``expected_version`` skips that specific check (unconditional write,
+        still gated on terminal-status) — the LiveKit worker path's exact
+        existing behavior, preserved on purpose.
+        """
+        ...
+
 
 @dataclass
 class _SessionRow:
@@ -75,6 +125,12 @@ class _SessionRow:
     answers: list[dict] = field(default_factory=list)
     progress: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Optimistic-concurrency counter — see the module docstring. Bumped on
+    # every mutating call, including the ones below that don't otherwise need
+    # retry logic (no real race is possible without a yield point between a
+    # read and a write, and nothing here awaits in between), so version
+    # tracking stays consistent whichever repository a test/deployment uses.
+    version: int = 1
 
 
 class MemoryRepository:
@@ -99,6 +155,7 @@ class MemoryRepository:
     async def save_context(self, session_id: str, ctx: InterviewContext) -> None:
         row = self._require(session_id)
         row.context = ctx.model_dump()
+        row.version += 1
 
     async def load_context(self, session_id: str) -> InterviewContext | None:
         row = self._rows.get(session_id)
@@ -107,7 +164,9 @@ class MemoryRepository:
         return InterviewContext.model_validate(row.context)
 
     async def update_status(self, session_id: str, status: str) -> None:
-        self._require(session_id).status = status
+        row = self._require(session_id)
+        row.status = status
+        row.version += 1
 
     async def append_answer(self, session_id: str, a: AnswerRecord) -> None:
         row = self._require(session_id)
@@ -118,12 +177,17 @@ class MemoryRepository:
             ctx = InterviewContext.model_validate(row.context)
             ctx.answers.append(a)
             row.context = ctx.model_dump()
+        row.version += 1
 
     async def save_scorecard(self, session_id: str, sc: ScoreCard) -> None:
-        self._require(session_id).scorecard = sc.model_dump()
+        row = self._require(session_id)
+        row.scorecard = sc.model_dump()
+        row.version += 1
 
     async def save_transcript(self, session_id: str, turns: list[dict]) -> None:
-        self._require(session_id).transcript = list(turns)
+        row = self._require(session_id)
+        row.transcript = list(turns)
+        row.version += 1
 
     async def save_coach_transcript(self, session_id: str, turns: list[dict]) -> None:
         self._require(session_id).coach_transcript = list(turns)
@@ -132,12 +196,43 @@ class MemoryRepository:
         row = self._require(session_id)
         if step not in row.progress:
             row.progress.append(step)
+            row.version += 1
 
     async def add_warnings(self, session_id: str, warnings: list[str]) -> None:
         row = self._require(session_id)
+        changed = False
         for w in warnings:
             if w not in row.warnings:
                 row.warnings.append(w)
+                changed = True
+        if changed:
+            row.version += 1
+
+    async def save_live_result(
+        self,
+        session_id: str,
+        *,
+        context: InterviewContext,
+        transcript: list[dict] | None = None,
+        status: str | None = None,
+        expected_version: int | None = None,
+    ) -> int | None:
+        row = self._rows.get(session_id)
+        if row is None:
+            return None
+        if row.status in TERMINAL_STATUSES:
+            return None
+        if status is not None and status not in ALLOWED_LIVE_STATUSES:
+            return None
+        if expected_version is not None and row.version != expected_version:
+            return None
+        row.context = context.model_dump()
+        if transcript is not None:
+            row.transcript = list(transcript)
+        if status is not None:
+            row.status = status
+        row.version += 1
+        return row.version
 
     async def get_session_view(self, session_id: str) -> SessionView | None:
         row = self._rows.get(session_id)
@@ -156,6 +251,7 @@ class MemoryRepository:
             prep_warnings=list(row.warnings),
             context=context,
             scorecard=scorecard,
+            version=row.version,
         )
 
     # --- test / inspection helpers (not part of the protocol) ----------------
@@ -228,17 +324,85 @@ class SupabaseRepository:
     async def update_status(self, session_id: str, status: str) -> None:
         await self._update(session_id, {"status": status})
 
-    async def append_answer(self, session_id: str, a: AnswerRecord) -> None:
-        def _build() -> Any:
-            return self._table().select("context").eq("id", session_id).limit(1).execute()
+    async def _read_modify_write_retry(
+        self,
+        session_id: str,
+        select_cols: str,
+        compute_update: Any,  # Callable[[dict[str, Any]], dict[str, Any] | None]
+    ) -> bool:
+        """Read ``select_cols`` + ``version``, call ``compute_update(row)`` to
+        get the new column values to write (or ``None`` for "no change
+        needed"), and write conditionally on the version just read — retrying
+        up to ``_INTERNAL_RETRY_ATTEMPTS`` times if a concurrent writer wins
+        the race in between. Closes a real, independent read-modify-write
+        race in append_answer/mark_progress/add_warnings below: each already
+        did its own select-then-mutate-then-update with no version check at
+        all, so two concurrent calls could each read the same array and each
+        overwrite the other's append.
+        """
+        for _attempt in range(_INTERNAL_RETRY_ATTEMPTS):
 
-        resp = await self._exec(_build)
-        rows = getattr(resp, "data", None) or []
-        if not rows or not rows[0].get("context"):
-            return
-        ctx = InterviewContext.model_validate(rows[0]["context"])
-        ctx.answers.append(a)
-        await self._update(session_id, {"context": ctx.model_dump()})
+            def _build_select() -> Any:
+                return (
+                    self._table()
+                    .select(f"{select_cols},version")
+                    .eq("id", session_id)
+                    .limit(1)
+                    .execute()
+                )
+
+            resp = await self._exec(_build_select)
+            rows = getattr(resp, "data", None) or []
+            if not rows:
+                return False
+            row = rows[0]
+            # .get(key, default) only falls back when the KEY is absent, not
+            # when its value is explicitly None (e.g. an older row / a test
+            # fixture predating this column) — the real Postgres column is
+            # NOT NULL DEFAULT 1, so None here only ever means "unknown,
+            # treat as the default."
+            version = row.get("version") or 1
+            updates = compute_update(row)
+            if updates is None:
+                return True  # nothing to change — not a conflict, just a no-op
+            updates["version"] = version + 1
+
+            def _build_update(updates: dict[str, Any] = updates, version: int = version) -> Any:
+                # Default-arg capture, not closure-over-loop-var: each retry
+                # iteration reassigns updates/version before this is (re)defined,
+                # and this callable is always invoked+awaited before the loop
+                # moves on — but binding explicitly avoids any ambiguity.
+                return (
+                    self._table()
+                    .update(updates)
+                    .eq("id", session_id)
+                    .eq("version", version)
+                    .execute()
+                )
+
+            resp2 = await self._exec(_build_update)
+            if getattr(resp2, "data", None):
+                return True
+            # 0 rows updated: a concurrent writer changed the version between
+            # our read and write. Re-read and retry rather than lose this
+            # write silently.
+        log.warning(
+            "repository: read-modify-write retry budget (%d) exhausted for %s",
+            _INTERNAL_RETRY_ATTEMPTS,
+            session_id,
+        )
+        return False
+
+    async def append_answer(self, session_id: str, a: AnswerRecord) -> None:
+        def _compute(row: dict[str, Any]) -> dict[str, Any] | None:
+            ctx_data = row.get("context")
+            if not ctx_data:
+                return None
+            ctx = InterviewContext.model_validate(ctx_data)
+            ctx.answers.append(a)
+            return {"context": ctx.model_dump()}
+
+        await self._read_modify_write_retry(session_id, "context", _compute)
 
     async def save_scorecard(self, session_id: str, sc: ScoreCard) -> None:
         await self._update(session_id, {"scorecard": sc.model_dump()})
@@ -252,36 +416,82 @@ class SupabaseRepository:
         await self._update(session_id, {"coach_transcript": list(turns)})
 
     async def mark_progress(self, session_id: str, step: str) -> None:
-        def _build() -> Any:
-            return self._table().select("progress").eq("id", session_id).limit(1).execute()
-
-        resp = await self._exec(_build)
-        rows = getattr(resp, "data", None) or []
-        progress = list(rows[0].get("progress") or []) if rows else []
-        if step not in progress:
+        def _compute(row: dict[str, Any]) -> dict[str, Any] | None:
+            progress = list(row.get("progress") or [])
+            if step in progress:
+                return None
             progress.append(step)
-            await self._update(session_id, {"progress": progress})
+            return {"progress": progress}
+
+        await self._read_modify_write_retry(session_id, "progress", _compute)
 
     async def add_warnings(self, session_id: str, warnings: list[str]) -> None:
-        def _build() -> Any:
-            return self._table().select("prep_warnings").eq("id", session_id).limit(1).execute()
+        def _compute(row: dict[str, Any]) -> dict[str, Any] | None:
+            existing = list(row.get("prep_warnings") or [])
+            changed = False
+            for w in warnings:
+                if w not in existing:
+                    existing.append(w)
+                    changed = True
+            return {"prep_warnings": existing} if changed else None
 
-        resp = await self._exec(_build)
+        await self._read_modify_write_retry(session_id, "prep_warnings", _compute)
+
+    async def save_live_result(
+        self,
+        session_id: str,
+        *,
+        context: InterviewContext,
+        transcript: list[dict] | None = None,
+        status: str | None = None,
+        expected_version: int | None = None,
+    ) -> int | None:
+        if status is not None and status not in ALLOWED_LIVE_STATUSES:
+            return None
+
+        def _build_select() -> Any:
+            return self._table().select("status,version").eq("id", session_id).limit(1).execute()
+
+        resp = await self._exec(_build_select)
         rows = getattr(resp, "data", None) or []
-        existing = list(rows[0].get("prep_warnings") or []) if rows else []
-        changed = False
-        for w in warnings:
-            if w not in existing:
-                existing.append(w)
-                changed = True
-        if changed:
-            await self._update(session_id, {"prep_warnings": existing})
+        if not rows:
+            return None
+        current_status = rows[0].get("status", "prep")
+        current_version = rows[0].get("version") or 1
+        if current_status in TERMINAL_STATUSES:
+            return None
+        if expected_version is not None and current_version != expected_version:
+            return None
+
+        values: dict[str, Any] = {"context": context.model_dump(), "version": current_version + 1}
+        if transcript is not None:
+            values["transcript"] = list(transcript)
+        if status is not None:
+            values["status"] = status
+
+        def _build_update() -> Any:
+            return (
+                self._table()
+                .update(values)
+                .eq("id", session_id)
+                .eq("version", current_version)
+                .execute()
+            )
+
+        resp2 = await self._exec(_build_update)
+        if not getattr(resp2, "data", None):
+            # Lost the race between our read and write — a genuinely stale
+            # writer (or a second live connection). Never retry-and-clobber
+            # here: this conflict is a meaningful signal the caller needs,
+            # not something to silently paper over.
+            return None
+        return current_version + 1
 
     async def get_session_view(self, session_id: str) -> SessionView | None:
         def _build() -> Any:
             return (
                 self._table()
-                .select("id,status,progress,prep_warnings,context,scorecard")
+                .select("id,status,progress,prep_warnings,context,scorecard,version")
                 .eq("id", session_id)
                 .limit(1)
                 .execute()
@@ -303,6 +513,7 @@ class SupabaseRepository:
             prep_warnings=list(row.get("prep_warnings") or []),
             context=context,
             scorecard=scorecard,
+            version=row.get("version") or 1,
         )
 
     async def _update(self, session_id: str, values: dict[str, Any]) -> None:

@@ -36,6 +36,7 @@ columns: it generates a text `id` (`sess_<uuid>`), stores the full
 | `context`       | jsonb       | serialized `InterviewContext`                     |
 | `scorecard`     | jsonb       | serialized `ScoreCard`                            |
 | `transcript`    | jsonb       | list of turn objects                              |
+| `version`       | integer     | optimistic-concurrency counter, default `1` — see `core/persistence/repository.py`'s versioned write methods |
 | `created_at`    | timestamptz | default `now()`                                   |
 | `updated_at`    | timestamptz | bumped on every update by the `sessions_touch` trigger |
 

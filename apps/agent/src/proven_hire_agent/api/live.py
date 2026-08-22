@@ -39,6 +39,7 @@ from ..core.config import Settings
 from ..core.deps import Deps, build_deps
 from ..core.logging import get_logger
 from ..live import orchestrator as orch
+from ..live import protocol
 from ..live.guard import SessionGuard, wrap_up_line
 from ..live.orchestrator import CompleteFn, CompletionResult, LiveTurnSession, ToolCall
 from ..live.persistence import flush_checkpoint, persist_and_score
@@ -250,7 +251,7 @@ class _WsSessionFacade:
 
     async def say(self, text: str) -> None:
         with contextlib.suppress(Exception):
-            await self._ws.send_json({"type": "speak", "text": text})
+            await self._ws.send_json(protocol.speak(text))
 
     def shutdown(self, *, drain: bool = True) -> None:
         self.ended = True
@@ -273,13 +274,18 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
 
     ud = InterviewUserdata(ctx=view.context, session_id=session_id)
+    # Track the version this connection last knew about (Phase 2) — every
+    # persist call below supplies it as expected_version, so this session's
+    # own repeated checkpoints keep succeeding while a genuinely stale or
+    # concurrent writer gets rejected instead of silently overwritten.
+    ud.version = view.version
     session = LiveTurnSession(ud=ud)
     await deps.live_session_repo.put(session_id, session)
 
     try:
         complete_fn = _make_openai_complete_fn(deps.settings)
     except RuntimeError as exc:
-        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.send_json(protocol.error(str(exc)))
         await websocket.close(code=1011)
         return
 
@@ -300,7 +306,7 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
 
     try:
         opening = await orch.open_interview(session, complete_fn)
-        await websocket.send_json({"type": "speak", "text": opening.reply_text})
+        await websocket.send_json(protocol.speak(opening.reply_text))
         guard.start()
 
         while not session.should_end and not facade.ended:
@@ -316,15 +322,37 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                 continue
             result = await orch.run_turn(session, text, complete_fn)
             if result.reply_text:
-                await websocket.send_json({"type": "speak", "text": result.reply_text})
+                await websocket.send_json(protocol.speak(result.reply_text))
             # Off-path checkpoint so GET /api/session/{id} (which the room UI
             # polls for questionText/cursor/turn history) reflects progress
             # DURING the interview, not just once it ends — without this the
             # candidate hears new questions but the UI never advances past
-            # question 1 until the whole session shuts down. Best-effort:
-            # never let a flaky checkpoint POST break the live turn loop.
-            with contextlib.suppress(Exception):
-                await flush_checkpoint(session_id, ud.ctx, ud.transcript, deps.settings)
+            # question 1 until the whole session shuts down. Network/other
+            # failures are still swallowed here (a flaky checkpoint POST must
+            # never break the live turn loop) — but a version conflict is a
+            # REAL signal, not noise: it means some other writer touched this
+            # session's persisted state since we last read it. Logged
+            # distinctly rather than folded into the same blanket suppress
+            # that used to hide it (see the Phase 2 plan) — full session-
+            # ownership enforcement (rejecting/reconciling a genuine second
+            # writer) is Phase 3's job; for now this at least makes the
+            # conflict observable instead of silently discarding the write.
+            try:
+                new_version = await flush_checkpoint(
+                    session_id, ud.ctx, ud.transcript, deps.settings, expected_version=ud.version
+                )
+            except Exception:
+                log.exception("live: checkpoint failed for %s", session_id)
+            else:
+                if new_version is not None:
+                    ud.version = new_version
+                else:
+                    log.warning(
+                        "live: checkpoint for %s did not update (stale version %s or "
+                        "session already terminal) — a concurrent writer may exist",
+                        session_id,
+                        ud.version,
+                    )
             if result.should_end:
                 break
 

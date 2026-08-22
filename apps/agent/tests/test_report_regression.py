@@ -96,7 +96,9 @@ def _post_live_result(
     }
     resp = client.post(f"/api/session/{ud.session_id}/live-result", json=payload)
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"ok": True}
+    body = resp.json()
+    assert body["ok"] is True
+    assert isinstance(body["version"], int)  # Phase 2: the new post-write version
 
 
 def _post_score(client: TestClient, session_id: str) -> dict:
@@ -358,6 +360,58 @@ def test_live_result_garbage_status_is_not_persisted_and_view_stays_readable() -
     assert deps.repo.get_status(ud.session_id) == "ready"
     # The context write-back itself still landed (only the status was dropped).
     assert view["context"] is not None
+
+
+def test_live_result_route_rejects_stale_expected_version_with_409() -> None:
+    """A stale expected_version (e.g. a reconnecting duplicate tab that never
+    saw a winning write land) gets a clean 409 — the winning write's state
+    must survive completely untouched, never silently overwritten."""
+    deps, ud = _prep_userdata()
+    client = _client()
+    v0 = deps.repo._rows[ud.session_id].version
+
+    winning_payload = {
+        "context": ud.ctx.model_dump(mode="json"),
+        "transcript": ud.transcript,
+        "status": None,
+        "expected_version": v0,
+    }
+    resp = client.post(f"/api/session/{ud.session_id}/live-result", json=winning_payload)
+    assert resp.status_code == 200, resp.text
+    v1 = resp.json()["version"]
+    assert v1 == v0 + 1
+
+    # A stale writer replays the version it read BEFORE the winning write.
+    stale_payload = dict(winning_payload, expected_version=v0)
+    resp2 = client.post(f"/api/session/{ud.session_id}/live-result", json=stale_payload)
+    assert resp2.status_code == 409
+
+    view = _get_view(client, ud.session_id)
+    assert view["version"] == v1
+
+
+def test_live_result_route_rejects_write_to_terminal_session_regardless_of_version() -> None:
+    """Once a session is terminal (no_answers/error/complete/rejected), no
+    write lands through this route — even one carrying the session's exact
+    current version. A finished interview's record is immutable."""
+    deps, ud = _prep_userdata()
+    client = _client()
+
+    _post_live_result(client, ud, status="no_answers")
+    terminal_version = deps.repo._rows[ud.session_id].version
+    assert deps.repo.get_status(ud.session_id) == "no_answers"
+
+    payload = {
+        "context": ud.ctx.model_dump(mode="json"),
+        "transcript": ud.transcript,
+        "status": None,
+        "expected_version": terminal_version,
+    }
+    resp = client.post(f"/api/session/{ud.session_id}/live-result", json=payload)
+    assert resp.status_code == 409
+
+    assert deps.repo.get_status(ud.session_id) == "no_answers"
+    assert deps.repo._rows[ud.session_id].version == terminal_version
 
 
 def test_recovered_answer_reaches_report_as_answered_coverage() -> None:

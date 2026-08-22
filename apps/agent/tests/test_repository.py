@@ -147,6 +147,12 @@ class _FakeSessionsTable:
         self._payload: Any = None
         self._cols: str | None = None
         self._id: str | None = None
+        # Optimistic-concurrency filter (Phase 2): set only when the caller
+        # chains ``.eq("version", ...)`` onto an update, i.e. every CAS write
+        # save_live_result/the read-modify-write retry helper issue. ``None``
+        # means no version filter was applied — every write this fixture saw
+        # before Phase 2, still exercised by the plain ``_update`` callers.
+        self._version: int | None = None
 
     def insert(self, payload: dict) -> _FakeSessionsTable:
         self._op, self._payload = "insert", payload
@@ -160,9 +166,15 @@ class _FakeSessionsTable:
         self._op, self._cols = "select", cols
         return self
 
-    def eq(self, col: str, value: str) -> _FakeSessionsTable:
-        assert col == "id", "the repository only ever filters by primary key"
-        self._id = value
+    def eq(self, col: str, value: Any) -> _FakeSessionsTable:
+        assert col in ("id", "version"), (
+            "the repository only ever filters by primary key or, for CAS "
+            "writes (Phase 2), the optimistic-concurrency version"
+        )
+        if col == "id":
+            self._id = value
+        else:
+            self._version = value
         return self
 
     def limit(self, n: int) -> _FakeSessionsTable:
@@ -178,6 +190,14 @@ class _FakeSessionsTable:
             json.dumps(self._payload)
             self._log.append(("update", self._payload, self._id))
             row = self._store.get(self._id or "")
+            # Simulate Postgres's WHERE version = <n>: a mismatch (including
+            # the fixture's "column predates this row" None-as-1 default)
+            # matches zero rows — the real row is left untouched and the
+            # caller sees an empty response, exactly like a real CAS conflict.
+            if row is not None and self._version is not None:
+                current_version = row.get("version") or 1
+                if current_version != self._version:
+                    row = None
             if row is not None:
                 row.update(self._payload)
             return _FakeSupabaseResponse([row] if row is not None else [])
@@ -321,7 +341,7 @@ def test_supabase_get_session_view_selects_migration_columns_and_maps_row() -> N
 
     # Pin the select column list against what the migrations actually create.
     select_cols = [cols for op, cols, row_id in fake.log if op == "select" and row_id == sid][-1]
-    assert select_cols == "id,status,progress,prep_warnings,context,scorecard"
+    assert select_cols == "id,status,progress,prep_warnings,context,scorecard,version"
     migration_files = sorted(_MIGRATIONS_DIR.glob("*.sql"))
     assert migration_files, f"no migrations found under {_MIGRATIONS_DIR}"
     migrations_sql = "".join(p.read_text() for p in migration_files)
@@ -330,3 +350,156 @@ def test_supabase_get_session_view_selects_migration_columns_and_maps_row() -> N
 
     # Unknown ids map to None (the API turns this into a 404, not a 500).
     assert _run(repo.get_session_view("sess_missing")) is None
+
+
+# --- save_live_result: versioned, atomic, transition-protected (Phase 2) ------
+
+
+def _ctx() -> InterviewContext:
+    ctx = build_mock(InterviewContext)
+    assert isinstance(ctx, InterviewContext)
+    return ctx
+
+
+def test_memory_save_live_result_two_sequential_writes_from_the_same_session_succeed() -> None:
+    """A session's own repeated writes (the per-turn checkpoint pattern) keep
+    succeeding as long as each supplies the version it just got back."""
+    repo = MemoryRepository()
+    sid = _run(repo.create_session(_prep_request()))
+    v0 = repo._rows[sid].version
+
+    v1 = _run(repo.save_live_result(sid, context=_ctx(), expected_version=v0))
+    assert v1 == v0 + 1
+
+    v2 = _run(repo.save_live_result(sid, context=_ctx(), expected_version=v1))
+    assert v2 == v1 + 1
+    assert repo._rows[sid].version == v2
+
+
+def test_memory_save_live_result_stale_version_is_rejected_without_corrupting_state() -> None:
+    """A second writer using the version it read BEFORE another write landed
+    must be rejected — and the winning write's state must survive untouched."""
+    repo = MemoryRepository()
+    sid = _run(repo.create_session(_prep_request()))
+    v0 = repo._rows[sid].version
+
+    winning_ctx = _ctx()
+    v1 = _run(repo.save_live_result(sid, context=winning_ctx, expected_version=v0))
+    assert v1 == v0 + 1
+
+    # A stale writer still holding v0 (e.g. a reconnecting duplicate tab).
+    stale_ctx = _ctx()
+    result = _run(repo.save_live_result(sid, context=stale_ctx, expected_version=v0))
+    assert result is None
+
+    # The winning write's context and version are untouched by the rejected one.
+    assert repo._rows[sid].version == v1
+    assert repo._rows[sid].context == winning_ctx.model_dump()
+
+
+def test_memory_save_live_result_terminal_session_rejects_write_regardless_of_version() -> None:
+    """Once a session reaches a terminal status, no write lands — even one
+    carrying the exact current version (the DB-write equivalent of a stale
+    reconnect racing the interview's own completion)."""
+    repo = MemoryRepository()
+    sid = _run(repo.create_session(_prep_request()))
+    v1 = _run(repo.save_live_result(sid, context=_ctx(), status="no_answers", expected_version=1))
+    assert v1 is not None
+    assert repo._rows[sid].status == "no_answers"
+
+    result = _run(repo.save_live_result(sid, context=_ctx(), expected_version=v1))
+    assert result is None
+    assert repo._rows[sid].version == v1  # untouched
+
+
+def test_supabase_save_live_result_two_sequential_writes_from_the_same_session_succeed() -> None:
+    repo, fake = _supabase_repo()
+    sid = _run(repo.create_session(_prep_request()))
+
+    v1 = _run(repo.save_live_result(sid, context=_ctx(), expected_version=1))
+    assert v1 == 2
+    assert fake.rows[sid]["version"] == 2
+
+    v2 = _run(repo.save_live_result(sid, context=_ctx(), expected_version=v1))
+    assert v2 == 3
+    assert fake.rows[sid]["version"] == 3
+
+
+def test_supabase_save_live_result_stale_version_is_rejected_without_corrupting_state() -> None:
+    repo, fake = _supabase_repo()
+    sid = _run(repo.create_session(_prep_request()))
+
+    winning_ctx = _ctx()
+    v1 = _run(repo.save_live_result(sid, context=winning_ctx, expected_version=1))
+    assert v1 == 2
+
+    stale_result = _run(repo.save_live_result(sid, context=_ctx(), expected_version=1))
+    assert stale_result is None
+    assert fake.rows[sid]["version"] == 2
+    assert fake.rows[sid]["context"] == winning_ctx.model_dump()
+
+
+def test_supabase_save_live_result_terminal_session_rejects_write_regardless_of_version() -> None:
+    repo, fake = _supabase_repo()
+    sid = _run(repo.create_session(_prep_request()))
+    v1 = _run(repo.save_live_result(sid, context=_ctx(), status="error", expected_version=1))
+    assert v1 == 2
+    assert fake.rows[sid]["status"] == "error"
+
+    result = _run(repo.save_live_result(sid, context=_ctx(), expected_version=v1))
+    assert result is None
+    assert fake.rows[sid]["version"] == 2
+
+
+def test_supabase_save_live_result_disallowed_status_is_rejected_before_any_read() -> None:
+    """A status outside {no_answers, error} must never even reach the store —
+    checked up front so it can't race a legitimate concurrent write."""
+    repo, fake = _supabase_repo()
+    sid = _run(repo.create_session(_prep_request()))
+    result = _run(repo.save_live_result(sid, context=_ctx(), status="complete", expected_version=1))
+    assert result is None
+    assert fake.rows[sid]["status"] == "prep"
+    assert not [op for op in fake.log if op[0] in ("select", "update")]
+
+
+def test_supabase_append_answer_retries_past_a_racing_writer() -> None:
+    """append_answer's internal read-modify-write race (distinct from
+    save_live_result's caller-supplied CAS): a second writer bumps the row's
+    version in the gap between this call's own read and write. The retry loop
+    must re-read and still land the answer, never silently lose it."""
+    repo, fake = _supabase_repo()
+    sid = _run(repo.create_session(_prep_request()))
+    ctx = _ctx()
+    base_answers = len(ctx.answers)
+    _run(repo.save_context(sid, ctx))
+    log_before_append = len(fake.log)
+
+    original_exec = repo._exec
+    call_count = {"n": 0}
+
+    async def racing_exec(build: Any) -> Any:
+        resp = await original_exec(build)
+        call_count["n"] += 1
+        # Race exactly once, right after append_answer's own first read —
+        # simulates a second writer landing its write before ours does.
+        if call_count["n"] == 1:
+            fake.rows[sid]["version"] = (fake.rows[sid].get("version") or 1) + 1
+        return resp
+
+    repo._exec = racing_exec  # type: ignore[method-assign]
+
+    answer = AnswerRecord(
+        question_id="q1",
+        transcript="Recovered despite a racing writer.",
+        started_at="2026-06-11T09:00:00Z",
+        ended_at="2026-06-11T09:01:00Z",
+    )
+    _run(repo.append_answer(sid, answer))
+
+    loaded = _run(repo.load_context(sid))
+    assert loaded is not None
+    assert len(loaded.answers) == base_answers + 1
+    assert loaded.answers[-1].model_dump() == answer.model_dump()
+    # One lost attempt (0-row conflict) plus the winning retry.
+    updates = [op for op in fake.log[log_before_append:] if op[0] == "update" and op[2] == sid]
+    assert len(updates) == 2

@@ -15,6 +15,7 @@ import asyncio
 
 from proven_hire_agent.core.deps import build_deps
 from proven_hire_agent.live import orchestrator as orch
+from proven_hire_agent.live import state
 from proven_hire_agent.live.orchestrator import (
     CompletionResult,
     LiveTurnSession,
@@ -203,3 +204,97 @@ def test_end_interview_tool_call_propagates_should_end_through_the_loop() -> Non
     assert session.should_end is True
     assert result.should_end is True
     assert result.reply_text == "Goodbye!"
+
+
+# --- transcript regression (Phase 1, backend hardening plan) -----------------
+
+
+def test_run_turn_populates_transcript_for_answer_recovery() -> None:
+    """Regression test: before this fix, InterviewUserdata.transcript was
+    never populated on this transport, silently disabling reconstruct_answers,
+    SessionGuard's turn-count ceiling, and transcript persistence. Scenario
+    directly from the audit: the candidate gives a real answer, the model
+    replies WITHOUT calling submit_answer, the connection then drops — the
+    verbatim answer must still be recoverable from the transcript."""
+    session = _session()
+    q1 = session.ud.ctx.plan.questions[0]
+    answer = (
+        "I led the migration of our legacy monolith's billing module to a "
+        "sharded ledger service, which cut reconciliation time from hours to minutes."
+    )
+
+    async def fake_complete(messages, tools):
+        return CompletionResult(content="Thanks for sharing that.")
+
+    result = asyncio.run(orch.run_turn(session, answer, fake_complete))
+
+    # The tool was never called — ctx.answers/cursor are untouched...
+    assert session.ud.ctx.answers == []
+    assert session.ud.ctx.cursor == 0
+    # ...but the transcript captured both real turns, the candidate's tagged
+    # with the question that was actually current when they spoke.
+    user_turns = [t for t in session.ud.transcript if t["role"] == "user"]
+    assert len(user_turns) == 1
+    assert user_turns[0]["text"] == answer
+    assert user_turns[0]["question_id"] == q1.id
+    assistant_turns = [t for t in session.ud.transcript if t["role"] == "assistant"]
+    assert assistant_turns[-1]["text"] == result.reply_text
+
+    # Simulating the disconnect: reconstruct_answers recovers exactly what
+    # was said, associated with the right question.
+    recovered = state.reconstruct_answers(session.ud)
+
+    assert recovered == 1
+    assert session.ud.ctx.answers[-1].question_id == q1.id
+    assert session.ud.ctx.answers[-1].transcript == answer
+
+    # A second shutdown-path invocation must not duplicate the recovered answer.
+    recovered_again = state.reconstruct_answers(session.ud)
+    assert recovered_again == 0
+    assert len(session.ud.ctx.answers) == 1
+
+
+def test_run_turn_transcript_tags_assistant_reply_with_new_question_after_advance() -> None:
+    """When submit_answer advances the cursor mid-turn, the resulting
+    assistant reply (the new question) is tagged with the NEW question's id,
+    not the one the candidate was answering — matching how a real
+    conversation transcript should read, and confirming add_turn's ordering:
+    the candidate's turn is tagged BEFORE tool execution, the assistant's
+    reply AFTER."""
+    session = _session()
+    q1 = session.ud.ctx.plan.questions[0]
+    q2 = session.ud.ctx.plan.questions[1]
+    calls = {"n": 0}
+
+    async def fake_complete(messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return CompletionResult(
+                tool_calls=[
+                    ToolCall(id="call_1", name="submit_answer", arguments={"answer": "Ledger service work."})
+                ]
+            )
+        return CompletionResult(content="Great, tell me about your next project.")
+
+    asyncio.run(orch.run_turn(session, "I built a ledger service.", fake_complete))
+
+    user_turns = [t for t in session.ud.transcript if t["role"] == "user"]
+    assistant_turns = [t for t in session.ud.transcript if t["role"] == "assistant"]
+    assert user_turns[-1]["question_id"] == q1.id  # answered while Q1 was current
+    assert assistant_turns[-1]["question_id"] == q2.id  # new question, now current
+
+
+def test_run_loop_bounded_safety_valve_does_not_record_empty_assistant_turn() -> None:
+    """The bounded-loop safety valve returns an empty reply — nothing was
+    actually said, so nothing should land in the transcript for it."""
+    session = _session()
+
+    async def fake_complete(messages, tools):
+        return CompletionResult(
+            tool_calls=[ToolCall(id="call_x", name="get_difficulty_hint", arguments={})]
+        )
+
+    asyncio.run(orch.run_turn(session, "an answer", fake_complete))
+
+    assistant_turns = [t for t in session.ud.transcript if t["role"] == "assistant"]
+    assert assistant_turns == []

@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.deps import build_deps
 from ..core.proctoring.scoring import compute_strike_score
+from ..core.session_status import ALLOWED_LIVE_STATUSES, TERMINAL_STATUSES
 from ..shared_models import InterviewContext, ProctoringEvent
 from .auth import require_internal_secret
 from .views import SessionView
@@ -40,13 +41,12 @@ class LiveResultRequest(BaseModel):
     transcript: list[dict] = Field(default_factory=list)
     # Optional terminal hint ("no_answers" when the interview captured nothing).
     status: str | None = None
-
-
-_ALLOWED_LIVE_STATUSES = {"no_answers", "error"}
-
-# Once a session reaches one of these it is done; a late/replayed live-result
-# write must not be able to overwrite a scored interview's history.
-_TERMINAL_STATUSES = {"complete", "no_answers", "error", "rejected"}
+    # Optimistic-concurrency version the caller last read (Phase 2 of the
+    # backend hardening plan). None — the LiveKit worker path's default, see
+    # InterviewUserdata.version — skips the version check entirely,
+    # preserving the old unconditional-overwrite behavior exactly; the WS
+    # transport always supplies one.
+    expected_version: int | None = None
 
 
 @router.get("/api/session/{session_id}", response_model=SessionView)
@@ -59,7 +59,7 @@ async def get_session(session_id: str) -> SessionView:
     # storing it on the session row — see core/proctoring/scoring.py for why
     # this is a pure recompute-on-read, not a stored/decremented value.
     # Skipped once terminal: a finished interview's score is no longer live.
-    if view.status not in _TERMINAL_STATUSES:
+    if view.status not in TERMINAL_STATUSES:
         events = await deps.proctoring_repo.list_events(session_id)
         if events:
             score = compute_strike_score(events, now=datetime.now(timezone.utc))
@@ -94,14 +94,28 @@ async def post_live_result(session_id: str, req: LiveResultRequest) -> dict:
         raise HTTPException(status_code=404, detail="Unknown session_id")
     # Refuse to rewrite a session that has already reached a terminal state:
     # the transcript/answers are final once scored, and a replayed or forged
-    # write must not be able to mutate them.
-    if view.status in _TERMINAL_STATUSES:
+    # write must not be able to mutate them. This pre-check exists for a
+    # clean, specific error message in the common case — the actual
+    # atomicity guarantee is save_live_result's own conditional UPDATE below,
+    # which re-verifies both this and the version at write time, closing the
+    # real TOCTOU race a pre-check alone can't.
+    if view.status in TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Session already {view.status}")
+    if req.expected_version is not None and view.version != req.expected_version:
         raise HTTPException(
-            status_code=409, detail=f"Session already {view.status}"
+            status_code=409,
+            detail=f"Stale version: request expected {req.expected_version}, session is at {view.version}",
         )
-    if req.transcript:
-        await deps.repo.save_transcript(session_id, req.transcript)
-    await deps.repo.save_context(session_id, req.context)
-    if req.status in _ALLOWED_LIVE_STATUSES:
-        await deps.repo.update_status(session_id, req.status)
-    return {"ok": True}
+
+    new_version = await deps.repo.save_live_result(
+        session_id,
+        context=req.context,
+        transcript=req.transcript or None,
+        status=req.status if req.status in ALLOWED_LIVE_STATUSES else None,
+        expected_version=req.expected_version,
+    )
+    if new_version is None:
+        # Lost a race that landed between the pre-checks above and the
+        # atomic write itself — a genuinely concurrent writer, not a bug.
+        raise HTTPException(status_code=409, detail="Session changed concurrently")
+    return {"ok": True, "version": new_version}

@@ -12,6 +12,15 @@ special-cased to call ``deps.repo`` directly — this preserves byte-identical
 behavior between both callers while the worker still needs the cross-process
 path; simplifying the in-process caller to skip the loopback is a reasonable
 Phase 8 cleanup once the worker (and this dual-path need) is gone.
+
+Version-aware (Phase 2 of the backend hardening plan): every function here
+reads/updates ``ud.version`` (``live/state.py``'s ``InterviewUserdata``) so
+the WS transport's repeated self-writes over one session's life keep
+succeeding while a genuinely stale/concurrent writer gets rejected instead of
+silently clobbering newer state. ``ud.version`` starts ``None`` for the
+LiveKit worker path (it never sets it) — every call below treats ``None`` as
+"skip the version check," reproducing that transport's old unconditional-
+overwrite behavior exactly, unchanged.
 """
 
 from __future__ import annotations
@@ -50,6 +59,7 @@ async def persist_via_api(
         "context": ud.ctx.model_dump(),
         "transcript": ud.transcript,
         "status": None if has_answers else "no_answers",
+        "expected_version": ud.version,
     }
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -58,43 +68,99 @@ async def persist_via_api(
                 json=payload,
                 headers=_internal_headers(settings),
             )
-        return resp.status_code == 200
+        if resp.status_code == 409:
+            log.warning(
+                "live: live-result POST for %s rejected as stale/concurrent "
+                "(expected_version=%s): %s",
+                session_id,
+                ud.version,
+                resp.text[:200],
+            )
+            return False
+        if resp.status_code != 200:
+            return False
+        new_version = resp.json().get("version")
+        if new_version is not None:
+            ud.version = new_version
+        return True
     except Exception:
         log.exception("live: live-result POST failed for %s", session_id)
         return False
 
 
 async def flush_checkpoint(
-    session_id: str, context: InterviewContext, transcript: list[dict], settings: Settings
-) -> None:
+    session_id: str,
+    context: InterviewContext,
+    transcript: list[dict],
+    settings: Settings,
+    *,
+    expected_version: int | None = None,
+) -> int | None:
     """Off-path partial persist for a periodic checkpointer (non-terminal,
-    best-effort — any failure is the caller's to swallow). Signature matches
-    ``TranscriptFlusher``'s ``FlushFn`` shape (context, transcript) once
-    ``session_id``/``settings`` are bound via a closure/``functools.partial``
-    at the call site — mirrors exactly how ``worker.py``'s own
-    ``_flush_checkpoint`` closure captured them today.
+    best-effort — network/other exceptions are still the caller's to swallow,
+    unchanged). Signature still matches ``TranscriptFlusher``'s ``FlushFn``
+    shape (context, transcript) once ``session_id``/``settings`` are bound via
+    a closure at the call site — ``expected_version`` is a NEW keyword-only
+    addition callers that don't know about it (``worker.py``'s closure) never
+    pass, defaulting to ``None`` (skip the version check, the old
+    unconditional-write behavior, exactly preserved for that transport).
+
+    Returns the new version on success. Returns ``None`` — WITHOUT raising —
+    on a 409 (stale version or already-terminal session): a checkpoint losing
+    a race is informative, not exceptional, but it must not go on being
+    silently swallowed the way it was before this changed (that's what
+    originally hid the fact that a conflict is a real, meaningful signal).
     """
-    payload = {"context": context.model_dump(), "transcript": transcript, "status": None}
+    payload = {
+        "context": context.model_dump(),
+        "transcript": transcript,
+        "status": None,
+        "expected_version": expected_version,
+    }
     async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.post(
+        resp = await client.post(
             f"{_api_base(settings)}/api/session/{session_id}/live-result",
             json=payload,
             headers=_internal_headers(settings),
         )
+    if resp.status_code == 409:
+        log.warning(
+            "live: checkpoint for %s rejected as stale/concurrent (expected_version=%s): %s",
+            session_id,
+            expected_version,
+            resp.text[:200],
+        )
+        return None
+    if resp.status_code != 200:
+        return None
+    return resp.json().get("version")
 
 
 async def persist_via_repo(session_id: str, ud: InterviewUserdata, deps: Deps, *, has_answers: bool) -> bool:
-    """Direct-store fallback (correct when both callers share Supabase)."""
+    """Direct-store fallback (correct when both callers share Supabase).
+
+    Uses the versioned, atomic ``save_live_result`` (Phase 2) instead of the
+    old separate ``save_transcript``/``save_context``/``update_status`` calls
+    — one atomic write instead of three, and the same terminal-status/
+    version protection ``persist_via_api``'s HTTP route gets.
+    """
     try:
-        await deps.repo.save_transcript(session_id, ud.transcript)
+        new_version = await deps.repo.save_live_result(
+            session_id,
+            context=ud.ctx,
+            transcript=ud.transcript,
+            status=None if has_answers else "no_answers",
+            expected_version=ud.version,
+        )
     except Exception:
-        log.exception("live: save_transcript failed for %s", session_id)
-    try:
-        await deps.repo.save_context(session_id, ud.ctx)
-    except Exception:
+        # A hard failure (not a version conflict — those return None cleanly
+        # below), most likely an I/O error talking to the store itself.
+        # Best-effort: mark the session errored so a later read shows an
+        # honest failure state instead of silently looking untouched —
+        # matches the original save_context-specific behavior this replaces.
         log.exception(
-            "live: save_context FAILED for %s — answers not persisted; "
-            "skipping scoring to avoid a blank scorecard",
+            "live: save_live_result FAILED for %s — answers may not be persisted; "
+            "attempting to mark error",
             session_id,
         )
         try:
@@ -102,11 +168,15 @@ async def persist_via_repo(session_id: str, ud: InterviewUserdata, deps: Deps, *
         except Exception:
             log.exception("live: update_status(error) failed for %s", session_id)
         return False
-    if not has_answers:
-        try:
-            await deps.repo.update_status(session_id, "no_answers")
-        except Exception:
-            log.exception("live: update_status(no_answers) failed for %s", session_id)
+    if new_version is None:
+        log.warning(
+            "live: save_live_result for %s rejected — stale version (%s) or "
+            "already terminal",
+            session_id,
+            ud.version,
+        )
+        return False
+    ud.version = new_version
     return True
 
 

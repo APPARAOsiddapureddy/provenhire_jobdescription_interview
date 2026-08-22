@@ -51,11 +51,22 @@ class InterviewUserdata:
 
     ``ctx`` is the source of truth (cursor + answers live on it). ``transcript``
     is a flat ``[{"role", "text"}]`` log the worker flushes on shutdown.
+
+    ``version`` is the last-known optimistic-concurrency counter from
+    ``core/persistence/repository.py``'s ``save_live_result`` (Phase 2 of the
+    backend hardening plan) — ``None`` means "don't know / don't care," which
+    keeps every persist call in ``live/persistence.py`` unconditional, exactly
+    today's behavior. This is the field the LiveKit worker path (``worker.py``)
+    NEVER sets, by design: it stays ``None`` for the whole session, so that
+    transport keeps its old unconditional-overwrite semantics untouched. The
+    WS transport (``api/live.py``) is the one that reads it after loading the
+    session and keeps it updated after each successful persist.
     """
 
     ctx: InterviewContext
     session_id: str
     transcript: list[dict] = field(default_factory=list)
+    version: int | None = None
 
 
 def current_question(ud: InterviewUserdata) -> PlannedQuestion | None:

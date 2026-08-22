@@ -18,6 +18,17 @@ Design carried over unchanged from ``live/interviewer.py``/``live/handoffs.py``
   a real production bug (2026-08-17) where the interview got stuck because
   the model reliably made a save call but not always a separate advance call.
 
+One thing NOT carried over, and a real regression until this fix: LiveKit's
+``on_enter``/handoff plumbing gave the old path a free ``conversation_item_added``
+event for every committed user/assistant turn, which ``worker.py``'s
+``wire_transcript_capture`` used to populate ``InterviewUserdata.transcript``.
+This transport has no event system, so ``run_turn``/``_run_loop`` call
+``state.add_turn`` directly at the two points where real (spoken, not
+intermediate tool-call) text is known. Until this was wired, every live
+interview's transcript was permanently empty on this transport, which
+silently disabled ``state.reconstruct_answers`` (the answer-recovery safety
+net), ``SessionGuard``'s turn-count ceiling, and transcript persistence.
+
 English-first v1 (see the rework plan): OpenAI-only tool-calling. A
 Gemini-live adapter is explicitly deferred, not built here.
 """
@@ -433,6 +444,15 @@ async def _run_loop(session: LiveTurnSession, complete_fn: CompleteFn) -> TurnRe
         if not result.tool_calls:
             text = result.content or ""
             session.messages.append({"role": "assistant", "content": text})
+            # This is the only point where the model produces text that
+            # actually gets spoken (session.messages's tool-call/tool-result
+            # entries below never reach TTS) — the real-transport equivalent
+            # of LiveKit's "assistant" conversation_item_added event. Tagged
+            # AFTER any tool calls this same loop already executed, so it
+            # correctly reflects the question now current (e.g. the NEW
+            # question just asked), not the one the candidate was answering.
+            if text:
+                state.add_turn(session.ud, "assistant", text)
             return TurnResult(reply_text=text, should_end=session.should_end)
 
         # OpenAI requires the assistant tool-call message to precede the tool
@@ -485,5 +505,11 @@ async def run_turn(
     """One turn: the candidate said ``candidate_utterance`` (the STT
     ``UtteranceEnd``-committed text — see the client InterviewSession class),
     the LLM responds, possibly calling tools along the way."""
+    # Real committed candidate speech — the transport-agnostic equivalent of
+    # LiveKit's "user" conversation_item_added event. Tagged with the question
+    # active RIGHT NOW, before any tool call in this turn can advance the
+    # cursor, so it's tied to the question the candidate was actually
+    # answering (see state.add_turn's own docstring for why order matters).
+    state.add_turn(session.ud, "user", candidate_utterance)
     session.messages.append({"role": "user", "content": candidate_utterance})
     return await _run_loop(session, complete_fn)

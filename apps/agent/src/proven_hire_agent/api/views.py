@@ -8,24 +8,12 @@ input-quality warnings, and the assembled :class:`InterviewContext` once ready.
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.session_status import SessionStatus
 from ..shared_models import InterviewContext, ScoreCard
 
 __all__ = ["PROGRESS_STEPS", "SessionStatus", "SessionView"]
-
-# "complete" is the terminal state set by the post-interview scoring step
-# (see post/__init__.py); it must be a valid status or GET /api/session/{id}
-# 500s on any read after an interview ends, blocking re-joins.
-# "no_answers" is a terminal state for a session whose interview produced no
-# answers (ended without answering, or answers never persisted) — scoring is
-# skipped and no blank scorecard is written, so the UI can show an honest empty
-# state instead of a misleading all-zeros report.
-SessionStatus = Literal[
-    "prep", "ready", "rejected", "error", "complete", "no_answers"
-]
 
 # The canonical ordered set of prep steps a session progresses through. Reported
 # back as completed-step keys (a subset/permutation of these) in SessionView.
@@ -61,3 +49,10 @@ class SessionView(BaseModel):
     # recorded proctoring events (nothing to compute) or has reached a
     # terminal status (no longer live, skip the lookup).
     proctoring_score: float | None = None
+    # Optimistic-concurrency counter (core/persistence/repository.py's
+    # save_live_result) — internal use by the live-interview transport, not
+    # meaningful to the web report. Defaults to 1 so any caller constructing
+    # a SessionView without it (existing code, existing tests) is unaffected;
+    # the web app's Zod schema doesn't declare this field and silently
+    # strips it (non-strict z.object), so this is a safe additive change.
+    version: int = 1
