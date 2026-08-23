@@ -62,6 +62,18 @@ _SAFETY_VALVE_FALLBACK_LINE = (
     "Sorry, I'm having a little trouble right now — could you give me just a moment?"
 )
 
+# Phase 7 (backend hardening plan): bound what's actually SENT to the model
+# per completion call, independent of session.messages itself — which stays
+# the FULL durable history (needed intact for Phase 3's reconnect fidelity,
+# and it's what gets checkpointed to live_conversation). Without this, token
+# cost and latency grow unboundedly across a long interview even though the
+# model doesn't need the whole history to function correctly: the actual
+# interview state (current question, cursor, answers, persona) is tracked
+# structurally in ud.ctx/session.persona and rebuilt fresh into the system
+# prompt every turn (build_instructions) — message history is only for
+# conversational continuity, not correctness, so trimming old turns is safe.
+_MAX_CONTEXT_MESSAGES = 30
+
 
 @dataclass
 class LiveTurnSession:
@@ -446,11 +458,38 @@ class CompletionResult:
 CompleteFn = Callable[[list[dict[str, Any]], list[dict[str, Any]]], Awaitable[CompletionResult]]
 
 
+def _trimmed_messages(session: LiveTurnSession) -> list[dict[str, Any]]:
+    """The bounded working set actually sent to the model (Phase 7) — the
+    most recent ``_MAX_CONTEXT_MESSAGES``, WITHOUT ever starting mid a
+    tool-call/tool-result exchange (a "tool" message with no preceding
+    "assistant" tool_calls message in the same request is invalid and
+    every OpenAI-compatible provider rejects it). A candidate "user" turn
+    is always a clean boundary — it never follows mid-flight tool-call
+    machinery — so a naive last-N slice is trimmed FORWARD to the next
+    user turn inside the window.
+
+    ``session.messages`` itself is untouched — it stays the full durable
+    history Phase 3's reconnect and the live_conversation checkpoint rely
+    on; only what's sent to THIS completion call is bounded.
+    """
+    messages = session.messages
+    if len(messages) <= _MAX_CONTEXT_MESSAGES:
+        return list(messages)
+    window = messages[-_MAX_CONTEXT_MESSAGES:]
+    for i, msg in enumerate(window):
+        if msg.get("role") == "user":
+            return window[i:]
+    # No user turn anywhere in the window (a pathologically long single
+    # turn with many tool rounds) — sending the untrimmed history is safer
+    # than risking a malformed mid-tool-call sequence.
+    return list(messages)
+
+
 async def _run_loop(session: LiveTurnSession, complete_fn: CompleteFn) -> TurnResult:
     """Bounded "call the LLM, execute any tool calls, repeat" loop, shared by
     :func:`open_interview` and :func:`run_turn`."""
     for _ in range(_MAX_TOOL_ROUNDS):
-        messages = [{"role": "system", "content": build_instructions(session)}, *session.messages]
+        messages = [{"role": "system", "content": build_instructions(session)}, *_trimmed_messages(session)]
         result = await complete_fn(messages, TOOL_SCHEMAS)
 
         if not result.tool_calls:
@@ -534,7 +573,7 @@ async def _run_loop(session: LiveTurnSession, complete_fn: CompleteFn) -> TurnRe
         _MAX_TOOL_ROUNDS,
         session.ud.session_id,
     )
-    messages = [{"role": "system", "content": build_instructions(session)}, *session.messages]
+    messages = [{"role": "system", "content": build_instructions(session)}, *_trimmed_messages(session)]
     try:
         final = await complete_fn(messages, [])
         text = final.content or _SAFETY_VALVE_FALLBACK_LINE

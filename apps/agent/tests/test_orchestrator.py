@@ -173,6 +173,110 @@ def test_run_turn_executes_a_tool_call_then_replies() -> None:
     assert "tool" in roles
 
 
+# --- bounded LLM context growth (Phase 7, backend hardening plan) -----------
+
+
+def test_trimmed_messages_returns_everything_under_the_limit() -> None:
+    session = _session()
+    session.messages = [{"role": "user", "content": f"turn {i}"} for i in range(5)]
+
+    trimmed = orch._trimmed_messages(session)
+
+    assert trimmed == session.messages
+    assert trimmed is not session.messages  # a copy, not the live list
+
+
+def test_trimmed_messages_keeps_only_recent_turns_once_over_the_limit() -> None:
+    session = _session()
+    # Every entry is its own clean "user" boundary, so the trim point is
+    # unambiguous: exactly the last _MAX_CONTEXT_MESSAGES entries.
+    session.messages = [{"role": "user", "content": f"turn {i}"} for i in range(100)]
+
+    trimmed = orch._trimmed_messages(session)
+
+    assert len(trimmed) == orch._MAX_CONTEXT_MESSAGES
+    assert trimmed[-1] == {"role": "user", "content": "turn 99"}
+    assert trimmed[0] == {"role": "user", "content": f"turn {100 - orch._MAX_CONTEXT_MESSAGES}"}
+    # session.messages itself is completely untouched — Phase 3's reconnect
+    # and the live_conversation checkpoint both need the FULL history.
+    assert len(session.messages) == 100
+
+
+def test_trimmed_messages_never_starts_mid_tool_call_exchange() -> None:
+    """A "tool" message with no preceding "assistant"-with-tool_calls in
+    the SAME request is invalid and every OpenAI-compatible provider
+    rejects it. The tool-call exchange has to have messages AFTER it too
+    (not just before) for a naive last-N slice to actually land inside
+    it — positioned here so the naive cut lands EXACTLY on the "tool"
+    result message, the worst case."""
+    session = _session()
+    leading_filler = [{"role": "user", "content": f"leading {i}"} for i in range(10)]
+    real_exchange = [
+        {"role": "user", "content": "real question"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "tool result"},
+        {"role": "assistant", "content": "final reply"},
+    ]
+    trailing_filler = [
+        {"role": "user", "content": f"trailing {i}"} for i in range(orch._MAX_CONTEXT_MESSAGES - 2)
+    ]
+    session.messages = leading_filler + real_exchange + trailing_filler
+    # Confirm the setup actually creates the dangerous case before trusting
+    # the assertions below: the naive last-N slice's first element really
+    # is the orphaned "tool" message.
+    naive_window = session.messages[-orch._MAX_CONTEXT_MESSAGES :]
+    assert naive_window[0]["role"] == "tool"
+
+    trimmed = orch._trimmed_messages(session)
+
+    assert len(trimmed) <= orch._MAX_CONTEXT_MESSAGES
+    assert trimmed[0]["role"] == "user"  # never starts on a "tool" or bare "assistant" message
+    # No tool-result message anywhere without ITS OWN preceding tool-call
+    # assistant message also present in the trimmed window.
+    tool_call_ids_present = set()
+    for msg in trimmed:
+        if msg["role"] == "assistant" and msg.get("tool_calls"):
+            tool_call_ids_present.update(tc["id"] for tc in msg["tool_calls"])
+        if msg["role"] == "tool":
+            assert msg["tool_call_id"] in tool_call_ids_present
+
+
+def test_trimmed_messages_falls_back_to_full_history_if_no_user_boundary_exists() -> None:
+    """A pathological case (no "user" turn anywhere in the naive window) —
+    sending the untrimmed history is safer than a malformed sequence."""
+    session = _session()
+    session.messages = [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": str(i), "type": "function", "function": {}}]}
+        for i in range(orch._MAX_CONTEXT_MESSAGES + 5)
+    ]
+
+    trimmed = orch._trimmed_messages(session)
+
+    assert trimmed == session.messages
+
+
+def test_run_loop_actually_sends_a_trimmed_history_once_it_grows_past_the_limit() -> None:
+    """Integration-level: the REAL messages list handed to complete_fn is
+    bounded, not just the pure helper function in isolation."""
+    session = _session()
+    session.messages = [{"role": "user", "content": f"filler {i}"} for i in range(200)]
+    seen: dict[str, list] = {}
+
+    async def fake_complete(messages, tools):
+        seen["messages"] = messages
+        return CompletionResult(content="ok")
+
+    asyncio.run(orch.run_turn(session, "the real question", fake_complete))
+
+    # system prompt + at most _MAX_CONTEXT_MESSAGES of history (the new
+    # user turn was just appended to session.messages before this call).
+    assert len(seen["messages"]) <= orch._MAX_CONTEXT_MESSAGES + 1
+    assert seen["messages"][0]["role"] == "system"
+    # But the full 200+1 turns are still sitting in session.messages,
+    # untouched, for reconnect/checkpoint purposes.
+    assert len(session.messages) >= 201
+
+
 # --- tool-call hardening (Phase 4, backend hardening plan) -------------------
 
 
