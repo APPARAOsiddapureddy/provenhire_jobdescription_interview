@@ -554,3 +554,119 @@ def test_ws_reconnect_resumes_conversation_without_re_greeting(monkeypatch) -> N
     assert len(final_transcript) == 5
     texts = [t["text"] for t in final_transcript]
     assert len(texts) == len(set(texts))
+
+
+def test_ws_recovers_from_a_cas_conflict_then_reconnects_cleanly(monkeypatch) -> None:
+    """Phase 10's named cross-phase scenario: a checkpoint mid-session hits
+    a genuine CAS conflict (another writer bumped the version behind this
+    connection's back — regression: ud.version used to never resync,
+    permanently poisoning every later write including the final shutdown
+    persist), the connection must RECOVER and keep working, and a
+    reconnect right after must still work cleanly."""
+    session_id = _make_ready_session()
+    deps = build_deps()
+
+    calls: list[list[dict]] = []
+
+    def fake_make_complete_fn(settings, *, on_retry=None):
+        async def fake_complete(messages, tools):
+            calls.append(messages)
+            n = len(calls)
+            if n == 1:  # opening
+                return CompletionResult(content="Hi! Tell me about a hard bug you fixed.")
+            if n == 2:  # turn 1: the model saves the answer
+                return CompletionResult(
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            name="submit_answer",
+                            arguments={"answer": "I fixed a nasty race condition."},
+                        )
+                    ]
+                )
+            if n == 3:  # turn 1: reply after the tool result — its OWN
+                # checkpoint (checkpoint #2 below) is the one that conflicts.
+                return CompletionResult(content="Great — next: tell me about a system you designed.")
+            if n == 4:  # turn 2 — this checkpoint (#3) must succeed: proves
+                # the connection recovered instead of staying poisoned.
+                return CompletionResult(content="Nice — how did you verify the fix?")
+            # n == 5: the first call on the RECONNECTED connection.
+            return CompletionResult(content="Good context — one follow-up on that.")
+
+        return fake_complete
+
+    checkpoint_calls = {"n": 0}
+
+    async def _in_process_flush_checkpoint(
+        session_id, context, transcript, settings, *, expected_version=None, conversation=None
+    ):
+        checkpoint_calls["n"] += 1
+        if checkpoint_calls["n"] == 2:
+            # Simulate another writer bumping the version behind this
+            # connection's back, right before checkpoint #2's own write —
+            # deterministic (no cross-thread timing race): expected_version
+            # was already fixed as this call's argument, based on ud.version
+            # BEFORE this bump, so the write below is guaranteed to conflict.
+            deps.repo._rows[session_id].version += 1
+        return await deps.repo.save_live_result(
+            session_id,
+            context=context,
+            transcript=transcript,
+            status=None,
+            expected_version=expected_version,
+            conversation=conversation,
+        )
+
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
+    monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _in_process_flush_checkpoint)
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/live/session/{session_id}") as ws1:
+        ws1.receive_json()  # session_connected
+        ws1.receive_json()  # opening (checkpoint #1 follows, no conflict)
+
+        ws1.send_text('{"type": "utterance_end", "text": "I fixed a nasty race condition."}')
+        reply1 = ws1.receive_json()  # checkpoint #2 follows THIS — conflicts
+        assert reply1 == {"type": "speak", "text": "Great — next: tell me about a system you designed."}
+
+        # If the connection were still poisoned, this turn's own checkpoint
+        # (#3) would ALSO silently fail — but the turn loop doesn't
+        # surface checkpoint failures to the client either way, so the
+        # real proof is durable state, checked below after disconnect.
+        ws1.send_text('{"type": "utterance_end", "text": "Load-tested it before and after."}')
+        reply2 = ws1.receive_json()
+        assert reply2 == {"type": "speak", "text": "Nice — how did you verify the fix?"}
+
+        ws1.close()
+
+    async def _wait_for_release_and_checkpoint():
+        for _ in range(50):  # up to ~5s
+            released = await deps.live_session_repo.get(session_id) is None
+            view = await deps.repo.get_session_view(session_id)
+            if released and view is not None and view.context is not None and view.context.cursor == 1:
+                return view
+            await asyncio.sleep(0.1)
+        raise AssertionError("connection 1 never recovered/released ownership")
+
+    asyncio.run(_wait_for_release_and_checkpoint())
+    # Proof the connection recovered from the conflict rather than staying
+    # poisoned: checkpoint #3 (turn 2) DID land durably, not just checkpoint
+    # #1. If the resync fix were missing, turn 2's checkpoint (and the
+    # final shutdown persist) would have kept failing on the same stale
+    # version and this transcript would be stuck after turn 1.
+    assert len(deps.repo._rows[session_id].transcript) == 5  # greeting, Q1 answer, Q2 ask, Q2 answer, Q3 ask
+
+    with client.websocket_connect(f"/api/live/session/{session_id}") as ws2:
+        resumed = ws2.receive_json()
+        assert resumed == {"type": "session_resumed"}  # reconnect still works cleanly right after the conflict
+
+        ws2.send_text('{"type": "utterance_end", "text": "One more detail on that."}')
+        reply3 = ws2.receive_json()
+        assert reply3 == {"type": "speak", "text": "Good context — one follow-up on that."}
+        ws2.close()
+
+    assert len(calls) == 5
+    resumed_call_messages = json.dumps(calls[4])
+    assert "race condition" in resumed_call_messages  # the pre-conflict conversation survived intact

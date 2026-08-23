@@ -196,13 +196,54 @@ async def persist_via_repo(session_id: str, ud: InterviewUserdata, deps: Deps, *
             capture_error(inner_exc)
         return False
     if new_version is None:
+        # Stale expected_version (or the session went terminal) — the most
+        # likely real cause here isn't a genuine second writer (Phase 3a's
+        # ownership lock already prevents two LIVE connections for one
+        # session_id): it's this connection's OWN earlier write landing
+        # server-side while the response was lost to a network blip, so a
+        # later call still carries the pre-success version. This is the
+        # LAST chance to persist the candidate's work (persist_and_score's
+        # final call at shutdown) — leaving ud.version stale here would
+        # mean this exact rejection repeats forever, silently losing
+        # everything from this point on. Resync to the current version and
+        # retry ONCE before giving up.
         log.warning(
-            "live: save_live_result for %s rejected — stale version (%s) or "
-            "already terminal",
+            "live: save_live_result for %s rejected (expected_version=%s) — "
+            "resyncing and retrying once",
             session_id,
             ud.version,
         )
-        return False
+        try:
+            fresh = await deps.repo.get_session_view(session_id)
+        except Exception as exc:
+            log.exception("live: version resync read failed for %s", session_id)
+            capture_error(exc)
+            return False
+        if fresh is None:
+            return False
+        ud.version = fresh.version
+        try:
+            retry_version = await deps.repo.save_live_result(
+                session_id,
+                context=ud.ctx,
+                transcript=ud.transcript,
+                status=None if has_answers else "no_answers",
+                expected_version=ud.version,
+            )
+        except Exception as exc:
+            log.exception("live: save_live_result retry failed for %s", session_id)
+            capture_error(exc)
+            return False
+        if retry_version is None:
+            log.warning(
+                "live: save_live_result retry for %s ALSO rejected (version=%s) "
+                "— giving up (likely a genuinely terminal session)",
+                session_id,
+                ud.version,
+            )
+            return False
+        ud.version = retry_version
+        return True
     ud.version = new_version
     return True
 

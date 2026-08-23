@@ -137,3 +137,53 @@ def test_persist_and_score_background_mode_still_persists_durably(monkeypatch) -
     assert view.context is not None
     assert len(view.context.answers) == 1
     assert view.context.answers[0].transcript == "a real, substantive answer"
+
+
+# --- Phase 10: cross-phase integration — CAS-conflict recovery ---------------
+
+
+def test_persist_via_repo_resyncs_and_retries_once_after_a_stale_version() -> None:
+    """Regression (found completing Phase 10's cross-phase scenarios):
+    ud.version was never resynced after a rejected write — every
+    SUBSEQUENT write, including THIS one (persist_via_repo is the LAST
+    chance to persist at shutdown), would keep sending the same stale
+    expected_version and keep failing forever, silently losing the
+    candidate's work from that point on."""
+    deps = build_deps()
+    session_id = _run(deps.repo.create_session(_prep_request()))
+    ud = _answered_userdata(session_id)
+    ud.version = 1  # what this connection last knew
+
+    # Simulate another writer having bumped the version behind this
+    # connection's back (realistically: this connection's own earlier
+    # write landing server-side after its response was lost to a network
+    # blip) BEFORE this call.
+    row = deps.repo._rows[session_id]
+    row.version = 5
+
+    persisted = _run(live_persistence.persist_via_repo(session_id, ud, deps, has_answers=True))
+
+    assert persisted is True
+    assert ud.version == 6  # resynced to 5, then the retry's own write bumped it to 6
+    final = _run(deps.repo.get_session_view(session_id))
+    assert final is not None
+    assert final.context is not None
+    assert final.context.answers[0].transcript == "a real, substantive answer"
+
+
+def test_persist_via_repo_gives_up_cleanly_if_the_retry_also_fails() -> None:
+    """If the resync+retry ALSO fails (the session went genuinely terminal
+    in the meantime), persist_via_repo must give up cleanly — never loop,
+    never raise."""
+    deps = build_deps()
+    session_id = _run(deps.repo.create_session(_prep_request()))
+    ud = _answered_userdata(session_id)
+    ud.version = 1
+
+    row = deps.repo._rows[session_id]
+    row.status = "complete"  # genuinely terminal
+    row.version = 5
+
+    persisted = _run(live_persistence.persist_via_repo(session_id, ud, deps, has_answers=True))
+
+    assert persisted is False

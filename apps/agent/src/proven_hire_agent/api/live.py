@@ -496,6 +496,21 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                     session_id,
                     ud.version,
                 )
+                # Without this, ud.version stays stale FOREVER: every
+                # future checkpoint (and the final shutdown persist) would
+                # keep sending the same outdated expected_version and keep
+                # getting rejected, silently losing every answer from this
+                # point on for the rest of the session. Best-effort — if
+                # THIS also fails, the next checkpoint attempt just tries
+                # the resync again.
+                try:
+                    fresh = await deps.repo.get_session_view(session_id)
+                except Exception as exc:
+                    log.exception("live: version resync failed for %s", session_id)
+                    capture_error(exc)
+                else:
+                    if fresh is not None:
+                        ud.version = fresh.version
 
     async def _shutdown_sequence() -> None:
         await guard.aclose()
