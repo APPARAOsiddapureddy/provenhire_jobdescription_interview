@@ -430,7 +430,19 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
     try:
         complete_fn = _make_live_complete_fn(deps.settings, on_retry=_on_llm_retry)
     except RuntimeError as exc:
-        await websocket.send_json(protocol.error(str(exc)))
+        # exc's own text names the missing env var (e.g. "CEREBRAS_API_KEY is
+        # not configured") — genuinely useful in a server log, never
+        # candidate-safe to put on the wire (Phase 6): it confirms which
+        # internal provider is wired up and exactly how the deployment is
+        # misconfigured. Log the real detail, send a generic message.
+        log.error("live: cannot start session %s — configuration error: %s", session_id, exc)
+        capture_error(exc)
+        await websocket.send_json(
+            protocol.error(
+                "The interview service is temporarily unavailable. Please try again shortly.",
+                code="SERVICE_UNAVAILABLE",
+            )
+        )
         await websocket.close(code=1011)
         # Release the claim we just took — otherwise this session_id is
         # permanently unconnectable until process restart (the original,

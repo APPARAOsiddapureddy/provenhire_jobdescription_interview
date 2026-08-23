@@ -68,6 +68,34 @@ async def _no_op_flush_checkpoint(
     return None
 
 
+def test_ws_misconfigured_provider_never_leaks_the_env_var_name(monkeypatch) -> None:
+    """Phase 6 (candidate-safe errors): a misconfigured provider's own
+    RuntimeError text names the missing env var — genuinely useful in a
+    server log, never safe on the wire (it confirms which internal
+    provider is wired up and exactly how the deployment is broken). The
+    candidate must see a generic message instead."""
+    session_id = _make_ready_session()
+
+    def fake_make_complete_fn(settings, *, on_retry=None):
+        raise RuntimeError("CEREBRAS_API_KEY is not configured; the live orchestrator needs it.")
+
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
+
+    client = TestClient(app)
+    try:
+        with client.websocket_connect(f"/api/live/session/{session_id}") as ws:
+            failure = ws.receive_json()
+            assert failure["type"] == "error"
+            assert "CEREBRAS_API_KEY" not in failure["message"]
+            assert "not configured" not in failure["message"]
+            assert failure["message"]  # still a real, non-empty message
+            ws.receive_json()  # server closes (1011) right after
+        raised = False
+    except Exception:
+        raised = True
+    assert raised
+
+
 def test_ws_rejects_unknown_session() -> None:
     client = TestClient(app)
     try:
