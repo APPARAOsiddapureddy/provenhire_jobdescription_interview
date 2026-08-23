@@ -385,7 +385,13 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
 
     async def _shutdown_sequence() -> None:
         await guard.aclose()
-        await persist_and_score(session_id, ud, deps)
+        # background_score=True: release ownership as soon as PERSISTENCE is
+        # durable, not after scoring (which can run for minutes) also
+        # finishes — otherwise a candidate who disconnects mid-interview and
+        # reconnects gets wrongly rejected with session_conflict, blocked
+        # behind their own still-running scoring job. See persist_and_score's
+        # docstring (found via a real production smoke test).
+        await persist_and_score(session_id, ud, deps, background_score=True)
         await deps.live_session_repo.delete(session_id)
 
     try:

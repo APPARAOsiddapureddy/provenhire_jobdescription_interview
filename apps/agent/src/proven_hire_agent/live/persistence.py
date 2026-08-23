@@ -25,6 +25,10 @@ overwrite behavior exactly, unchanged.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Coroutine
+from typing import Any
+
 import httpx
 
 from ..core.config import Settings
@@ -35,6 +39,19 @@ from . import state
 from .state import InterviewUserdata
 
 log = get_logger(__name__)
+
+# asyncio only holds a WEAK reference to a task once nothing else references
+# it — a fire-and-forget `asyncio.create_task(...)` with no other referrer
+# can be garbage-collected mid-run, silently cancelling it. This set exists
+# solely to hold a strong reference until each task finishes; see
+# _fire_and_forget below.
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _fire_and_forget(coro: Coroutine[Any, Any, Any]) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def _api_base(settings: Settings) -> str:
@@ -202,12 +219,29 @@ async def trigger_scoring(session_id: str, settings: Settings) -> None:
         log.exception("live: scoring trigger failed for %s", session_id)
 
 
-async def persist_and_score(session_id: str, ud: InterviewUserdata, deps: Deps) -> None:
+async def persist_and_score(
+    session_id: str, ud: InterviewUserdata, deps: Deps, *, background_score: bool = False
+) -> None:
     """The full end-of-session sequence: recover unsaved answers from the
     verbatim transcript, persist (API then repo fallback), and — only if
     something was actually persisted and there ARE real answers — trigger
     scoring. Shared by worker.py's ``_on_shutdown`` (until Phase 8) and the
     new WS handler's disconnect/end path.
+
+    ``background_score`` (Phase 3, found via a real production smoke test):
+    ``False`` (default — the LiveKit worker's exact existing behavior,
+    unchanged) awaits scoring inline before returning, same as always.
+    ``True`` fires scoring as a detached background task instead and
+    returns as soon as PERSISTENCE is durable, without waiting for it.
+
+    The new WS handler passes ``True``: its shutdown sequence releases
+    ``live_session_repo``'s ownership claim right after this call returns
+    (Phase 3a), and ``trigger_scoring`` awaits ``/api/score`` with a 600s
+    read timeout (the endpoint runs the full scoring LLM pipeline inline).
+    Awaiting it here would mean a candidate who disconnects after answering
+    even one question could be locked out of reconnecting — rejected with a
+    ``session_conflict`` that has nothing to do with a genuine second
+    connection — for as long as their OWN scoring run takes.
     """
     recovered = state.reconstruct_answers(ud)
     if recovered:
@@ -223,4 +257,7 @@ async def persist_and_score(session_id: str, ud: InterviewUserdata, deps: Deps) 
             log.info("live: session %s has no answers; skipping scoring", session_id)
         return
 
-    await trigger_scoring(session_id, deps.settings)
+    if background_score:
+        _fire_and_forget(trigger_scoring(session_id, deps.settings))
+    else:
+        await trigger_scoring(session_id, deps.settings)
