@@ -87,7 +87,15 @@ interface DeepgramMessage {
 type CoordinationMessage =
   | { type: "speak"; text: string }
   | { type: "error"; message: string }
+  | { type: "session_conflict"; message: string }
   | { type: string; [key: string]: unknown };
+
+/** WS close code the server sends after a graceful end (the end_interview
+ * tool call, or SessionGuard's own wrap-up) — see api/live.py. Any other
+ * close is either a rejection the server already explained via a message
+ * (error / session_conflict, handled as it arrives — see
+ * terminalMessageHandled below) or a genuine unexpected drop. */
+const NORMAL_CLOSE_CODE = 1000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -137,6 +145,11 @@ export class InterviewSession {
 
   private floor: FloorState = "IDLE";
   private closed = false;
+  /** Set once an "error" or "session_conflict" coordination message has
+   * already been surfaced via onError — the close event that follows it
+   * must not ALSO fire onEnded() (which would silently redirect to the
+   * report page over what the candidate just saw as a real error). */
+  private terminalMessageHandled = false;
 
   private stream: MediaStream | null = null;
   private audioCtx: AudioContext | null = null;
@@ -261,7 +274,7 @@ export class InterviewSession {
     this.coordWs.addEventListener("message", (ev) => {
       this.pendingSpeak = this.handleCoordinationMessage(ev);
     });
-    this.coordWs.addEventListener("close", () => {
+    this.coordWs.addEventListener("close", (ev) => {
       if (this.closed) return;
       this.closed = true;
       void (async () => {
@@ -275,7 +288,23 @@ export class InterviewSession {
             // already surfaced via onError inside speak()
           }
         }
-        this.onEnded?.();
+        if (this.terminalMessageHandled) {
+          // Already surfaced via onError when the error/session_conflict
+          // message arrived, just above — don't also redirect to the
+          // report page as if the interview ended normally.
+          return;
+        }
+        if (ev.code === NORMAL_CLOSE_CODE) {
+          this.onEnded?.();
+        } else {
+          // The server closed without a graceful end_interview handshake
+          // and without an explanatory message first — a genuine drop
+          // (network blip, server restart), not a completed interview.
+          this.emitError(
+            "unexpected",
+            "The interview connection was lost unexpectedly.",
+          );
+        }
       })();
     });
 
@@ -532,7 +561,19 @@ export class InterviewSession {
       return;
     }
     if (msg.type === "error") {
+      this.terminalMessageHandled = true;
       this.emitError("unexpected", String(msg.message ?? "The interview session reported an error."));
+      return;
+    }
+    if (msg.type === "session_conflict") {
+      this.terminalMessageHandled = true;
+      this.emitError(
+        "unexpected",
+        String(
+          msg.message ??
+            "This interview is already open in another tab or window.",
+        ),
+      );
       return;
     }
     if (msg.type !== "speak") return;
