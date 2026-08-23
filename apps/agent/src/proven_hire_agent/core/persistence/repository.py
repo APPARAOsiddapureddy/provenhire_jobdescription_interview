@@ -22,6 +22,18 @@ status check. Passing ``expected_version=None`` reproduces the OLD
 unconditional-overwrite behavior exactly (still gated on the session not
 already being terminal) — this is what the LiveKit worker path keeps doing,
 unchanged; the new WS transport is the one that supplies a real version.
+
+``live_conversation`` (``supabase/migrations/0010_live_conversation.sql``,
+Phase 3) durably mirrors the live orchestrator's OWN runtime state — the raw
+LLM message history + active persona (``LiveTurnSession.messages``/
+``.persona`` in ``live/orchestrator.py``) — so a reconnecting WS connection
+can resume the actual conversation instead of losing it and re-greeting the
+candidate. Written via ``save_live_result``'s ``conversation`` parameter
+(``None`` = don't touch, same convention as every other optional param here)
+and read back via :meth:`SessionRepository.get_live_resume_state`, kept
+deliberately separate from :class:`SessionView`/``get_session_view`` — this is
+internal resume state for exactly one caller (``api/live.py``'s connect path),
+never part of the general-purpose read model the web report loads.
 """
 
 from __future__ import annotations
@@ -51,6 +63,27 @@ _INTERNAL_RETRY_ATTEMPTS = 5
 
 def _new_session_id() -> str:
     return f"sess_{uuid4().hex}"
+
+
+@dataclass(frozen=True)
+class LiveResumeState:
+    """Everything a reconnecting WS connection needs to resume a live
+    session's in-memory runtime state (Phase 3): the durable flat transcript
+    (Phase 1's question_id-tagged turns, needed so ``SessionGuard``'s turn-
+    count ceiling and future ``add_turn`` calls see the FULL history, not
+    just what happened after the reconnect) plus the raw LLM conversation +
+    active persona (``live_conversation``).
+
+    An empty ``messages`` list is the caller's own signal that this is a
+    FRESH session — never opened, or a pre-Phase-3 row with nothing to
+    resume — not a genuine reconnect; ``api/live.py`` branches on exactly
+    that, not on this object being ``None`` (which only means "unknown
+    session_id", already handled earlier by ``get_session_view``).
+    """
+
+    transcript: list[dict]
+    persona: str
+    messages: list[dict]
 
 
 @runtime_checkable
@@ -87,6 +120,7 @@ class SessionRepository(Protocol):
         transcript: list[dict] | None = None,
         status: str | None = None,
         expected_version: int | None = None,
+        conversation: dict | None = None,
     ) -> int | None:
         """Atomically persist a live-interview write-back.
 
@@ -100,7 +134,17 @@ class SessionRepository(Protocol):
         session's current version (a stale or second writer). ``None`` for
         ``expected_version`` skips that specific check (unconditional write,
         still gated on terminal-status) — the LiveKit worker path's exact
-        existing behavior, preserved on purpose.
+        existing behavior, preserved on purpose. ``conversation`` (Phase 3) is
+        the same "``None`` = don't touch this column" convention — only the
+        WS transport's per-turn checkpoint supplies it.
+        """
+        ...
+
+    async def get_live_resume_state(self, session_id: str) -> LiveResumeState | None:
+        """The durable state needed to resume a live WS session after a
+        reconnect (Phase 3) — ``None`` only if ``session_id`` is unknown.
+        See :class:`LiveResumeState` for how callers tell "fresh" from
+        "resume."
         """
         ...
 
@@ -125,6 +169,8 @@ class _SessionRow:
     answers: list[dict] = field(default_factory=list)
     progress: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Live orchestrator resume state (Phase 3) — see the module docstring.
+    live_conversation: dict[str, Any] = field(default_factory=dict)
     # Optimistic-concurrency counter — see the module docstring. Bumped on
     # every mutating call, including the ones below that don't otherwise need
     # retry logic (no real race is possible without a yield point between a
@@ -216,6 +262,7 @@ class MemoryRepository:
         transcript: list[dict] | None = None,
         status: str | None = None,
         expected_version: int | None = None,
+        conversation: dict | None = None,
     ) -> int | None:
         row = self._rows.get(session_id)
         if row is None:
@@ -229,10 +276,23 @@ class MemoryRepository:
         row.context = context.model_dump()
         if transcript is not None:
             row.transcript = list(transcript)
+        if conversation is not None:
+            row.live_conversation = dict(conversation)
         if status is not None:
             row.status = status
         row.version += 1
         return row.version
+
+    async def get_live_resume_state(self, session_id: str) -> LiveResumeState | None:
+        row = self._rows.get(session_id)
+        if row is None:
+            return None
+        conv = row.live_conversation or {}
+        return LiveResumeState(
+            transcript=list(row.transcript or []),
+            persona=conv.get("persona") or "interviewer",
+            messages=list(conv.get("messages") or []),
+        )
 
     async def get_session_view(self, session_id: str) -> SessionView | None:
         row = self._rows.get(session_id)
@@ -445,6 +505,7 @@ class SupabaseRepository:
         transcript: list[dict] | None = None,
         status: str | None = None,
         expected_version: int | None = None,
+        conversation: dict | None = None,
     ) -> int | None:
         if status is not None and status not in ALLOWED_LIVE_STATUSES:
             return None
@@ -466,6 +527,8 @@ class SupabaseRepository:
         values: dict[str, Any] = {"context": context.model_dump(), "version": current_version + 1}
         if transcript is not None:
             values["transcript"] = list(transcript)
+        if conversation is not None:
+            values["live_conversation"] = dict(conversation)
         if status is not None:
             values["status"] = status
 
@@ -486,6 +549,28 @@ class SupabaseRepository:
             # not something to silently paper over.
             return None
         return current_version + 1
+
+    async def get_live_resume_state(self, session_id: str) -> LiveResumeState | None:
+        def _build() -> Any:
+            return (
+                self._table()
+                .select("transcript,live_conversation")
+                .eq("id", session_id)
+                .limit(1)
+                .execute()
+            )
+
+        resp = await self._exec(_build)
+        rows = getattr(resp, "data", None) or []
+        if not rows:
+            return None
+        row = rows[0]
+        conv = row.get("live_conversation") or {}
+        return LiveResumeState(
+            transcript=list(row.get("transcript") or []),
+            persona=conv.get("persona") or "interviewer",
+            messages=list(conv.get("messages") or []),
+        )
 
     async def get_session_view(self, session_id: str) -> SessionView | None:
         def _build() -> Any:

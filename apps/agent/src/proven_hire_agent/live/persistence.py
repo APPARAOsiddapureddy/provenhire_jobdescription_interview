@@ -95,15 +95,20 @@ async def flush_checkpoint(
     settings: Settings,
     *,
     expected_version: int | None = None,
+    conversation: dict | None = None,
 ) -> int | None:
     """Off-path partial persist for a periodic checkpointer (non-terminal,
     best-effort — network/other exceptions are still the caller's to swallow,
     unchanged). Signature still matches ``TranscriptFlusher``'s ``FlushFn``
     shape (context, transcript) once ``session_id``/``settings`` are bound via
-    a closure at the call site — ``expected_version`` is a NEW keyword-only
-    addition callers that don't know about it (``worker.py``'s closure) never
-    pass, defaulting to ``None`` (skip the version check, the old
+    a closure at the call site — ``expected_version`` and ``conversation`` are
+    NEW keyword-only additions callers that don't know about them
+    (``worker.py``'s closure) never pass, both defaulting to ``None`` (skip
+    the version check / don't touch the durable conversation column — the old
     unconditional-write behavior, exactly preserved for that transport).
+    ``conversation`` (Phase 3) is the live WS orchestrator's own resumable
+    chat history (``{"persona", "messages"}``) — supplying it here is what
+    lets a reconnecting connection resume instead of losing the conversation.
 
     Returns the new version on success. Returns ``None`` — WITHOUT raising —
     on a 409 (stale version or already-terminal session): a checkpoint losing
@@ -116,6 +121,7 @@ async def flush_checkpoint(
         "transcript": transcript,
         "status": None,
         "expected_version": expected_version,
+        "conversation": conversation,
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(

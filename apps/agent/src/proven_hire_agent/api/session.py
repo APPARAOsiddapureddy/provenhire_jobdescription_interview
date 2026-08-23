@@ -47,6 +47,11 @@ class LiveResultRequest(BaseModel):
     # preserving the old unconditional-overwrite behavior exactly; the WS
     # transport always supplies one.
     expected_version: int | None = None
+    # The live WS orchestrator's own resumable chat history (Phase 3):
+    # {"persona": ..., "messages": [...]}. None means "don't touch this
+    # column" — only the WS transport's per-turn checkpoint supplies it; the
+    # LiveKit worker path never does, leaving it untouched exactly as today.
+    conversation: dict | None = None
 
 
 @router.get("/api/session/{session_id}", response_model=SessionView)
@@ -113,6 +118,7 @@ async def post_live_result(session_id: str, req: LiveResultRequest) -> dict:
         transcript=req.transcript or None,
         status=req.status if req.status in ALLOWED_LIVE_STATUSES else None,
         expected_version=req.expected_version,
+        conversation=req.conversation,
     )
     if new_version is None:
         # Lost a race that landed between the pre-checks above and the

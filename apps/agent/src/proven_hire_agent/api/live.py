@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict
 from ..core.config import Settings
 from ..core.deps import Deps, build_deps
 from ..core.logging import get_logger
+from ..core.session_status import TERMINAL_STATUSES
 from ..live import orchestrator as orch
 from ..live import protocol
 from ..live.guard import SessionGuard, wrap_up_line
@@ -270,6 +271,22 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
     if view is None or view.context is None:
         await websocket.close(code=4404)
         return
+    if view.status in TERMINAL_STATUSES:
+        # A finished interview's record is final (Phase 2's terminal-status
+        # protection) — refuse to spin up a phantom second interview whose
+        # answers could never actually be saved. Pre-accept close, same
+        # shape as the unknown-session case above: there is genuinely
+        # nothing here for a new connection to attach to.
+        await websocket.close(code=4409)
+        return
+
+    # Read the durable resume state BEFORE accepting, so the fresh-vs-resume
+    # decision (and everything built from it below) is made once, up front.
+    # An empty ``messages`` list means either a session that never opened a
+    # connection yet, or one that predates Phase 3 — both are a fresh start,
+    # not a resume.
+    resume_state = await deps.repo.get_live_resume_state(session_id)
+    is_resume = resume_state is not None and bool(resume_state.messages)
 
     await websocket.accept()
 
@@ -279,14 +296,47 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
     # own repeated checkpoints keep succeeding while a genuinely stale or
     # concurrent writer gets rejected instead of silently overwritten.
     ud.version = view.version
+    if resume_state is not None:
+        # Restore the FULL durable transcript, not just what this connection
+        # will add — SessionGuard's turn-count ceiling reads len(ud.transcript),
+        # so under-restoring it would let a candidate raise the effective
+        # limit simply by reconnecting.
+        ud.transcript = list(resume_state.transcript)
+
     session = LiveTurnSession(ud=ud)
-    await deps.live_session_repo.put(session_id, session)
+    if is_resume:
+        assert resume_state is not None  # is_resume implies this
+        session.persona = resume_state.persona
+        session.messages = list(resume_state.messages)
+
+    claimed = await deps.live_session_repo.try_claim(session_id, session)
+    if not claimed:
+        # Another connection for this session_id is ALREADY live in-process
+        # right now (its shutdown sequence hasn't run — e.g. a stale tab the
+        # server hasn't yet noticed disconnected, or two tabs open at once).
+        # Refuse this one outright rather than let two writers race over the
+        # same InterviewUserdata/context — see live_session_repository.py's
+        # try_claim docstring.
+        with contextlib.suppress(Exception):
+            await websocket.send_json(
+                protocol.session_conflict(
+                    "This interview session is already connected elsewhere."
+                )
+            )
+        await websocket.close(code=4409)
+        return
 
     try:
         complete_fn = _make_openai_complete_fn(deps.settings)
     except RuntimeError as exc:
         await websocket.send_json(protocol.error(str(exc)))
         await websocket.close(code=1011)
+        # Release the claim we just took — otherwise this session_id is
+        # permanently unconnectable until process restart (the original,
+        # still-open leak this rewrite also closes: a config failure used to
+        # leave live_session_repo holding an entry no shutdown path would
+        # ever ``put()``, since that used to happen unconditionally too).
+        await deps.live_session_repo.delete(session_id)
         return
 
     facade = _WsSessionFacade(websocket)
@@ -299,14 +349,63 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
         wrap_up_line=wrap_up_line(lang_mode.primary),
     )
 
+    async def _checkpoint() -> None:
+        # Off-path checkpoint so GET /api/session/{id} (which the room UI
+        # polls for questionText/cursor/turn history) reflects progress
+        # DURING the interview, not just once it ends — without this the
+        # candidate hears new questions but the UI never advances past
+        # question 1 until the whole session shuts down. Also carries the
+        # live conversation (Phase 3) so a later reconnect can resume it.
+        # Network/other failures are still swallowed here (a flaky
+        # checkpoint POST must never break the live turn loop) — but a
+        # version conflict is a REAL signal, not noise: it means some other
+        # writer touched this session's persisted state since we last read
+        # it. Logged distinctly rather than folded into a blanket suppress.
+        try:
+            new_version = await flush_checkpoint(
+                session_id,
+                ud.ctx,
+                ud.transcript,
+                deps.settings,
+                expected_version=ud.version,
+                conversation={"persona": session.persona, "messages": session.messages},
+            )
+        except Exception:
+            log.exception("live: checkpoint failed for %s", session_id)
+        else:
+            if new_version is not None:
+                ud.version = new_version
+            else:
+                log.warning(
+                    "live: checkpoint for %s did not update (stale version %s or "
+                    "session already terminal) — a concurrent writer may exist",
+                    session_id,
+                    ud.version,
+                )
+
     async def _shutdown_sequence() -> None:
         await guard.aclose()
         await persist_and_score(session_id, ud, deps)
         await deps.live_session_repo.delete(session_id)
 
     try:
-        opening = await orch.open_interview(session, complete_fn)
-        await websocket.send_json(protocol.speak(opening.reply_text))
+        if is_resume:
+            # Skip open_interview()'s greeting entirely — the candidate
+            # already heard it. The client already knows what's current via
+            # its own GET /api/session/{id} poll; the model's next actual
+            # reply (once the candidate speaks) naturally continues the
+            # restored conversation since session.messages carries it.
+            await websocket.send_json(protocol.session_resumed())
+        else:
+            await websocket.send_json(protocol.session_connected())
+            opening = await orch.open_interview(session, complete_fn)
+            await websocket.send_json(protocol.speak(opening.reply_text))
+            # Durably save turn-0 state immediately: without this, a
+            # candidate who disconnects right after the greeting — before
+            # ever answering, so the loop below never runs — reconnects to
+            # an EMPTY live_conversation and gets re-greeted instead of
+            # resumed.
+            await _checkpoint()
         guard.start()
 
         while not session.should_end and not facade.ended:
@@ -323,36 +422,7 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
             result = await orch.run_turn(session, text, complete_fn)
             if result.reply_text:
                 await websocket.send_json(protocol.speak(result.reply_text))
-            # Off-path checkpoint so GET /api/session/{id} (which the room UI
-            # polls for questionText/cursor/turn history) reflects progress
-            # DURING the interview, not just once it ends — without this the
-            # candidate hears new questions but the UI never advances past
-            # question 1 until the whole session shuts down. Network/other
-            # failures are still swallowed here (a flaky checkpoint POST must
-            # never break the live turn loop) — but a version conflict is a
-            # REAL signal, not noise: it means some other writer touched this
-            # session's persisted state since we last read it. Logged
-            # distinctly rather than folded into the same blanket suppress
-            # that used to hide it (see the Phase 2 plan) — full session-
-            # ownership enforcement (rejecting/reconciling a genuine second
-            # writer) is Phase 3's job; for now this at least makes the
-            # conflict observable instead of silently discarding the write.
-            try:
-                new_version = await flush_checkpoint(
-                    session_id, ud.ctx, ud.transcript, deps.settings, expected_version=ud.version
-                )
-            except Exception:
-                log.exception("live: checkpoint failed for %s", session_id)
-            else:
-                if new_version is not None:
-                    ud.version = new_version
-                else:
-                    log.warning(
-                        "live: checkpoint for %s did not update (stale version %s or "
-                        "session already terminal) — a concurrent writer may exist",
-                        session_id,
-                        ud.version,
-                    )
+            await _checkpoint()
             if result.should_end:
                 break
 
