@@ -270,6 +270,85 @@ def test_ws_opening_failure_sends_temporary_failure_and_closes(monkeypatch) -> N
     assert raised
 
 
+# --- Phase 5: ingress hardening (utterance length cap + rate limiting) -------
+
+
+def test_ws_oversized_utterance_is_rejected_not_silently_truncated(monkeypatch) -> None:
+    session_id = _make_ready_session()
+    calls = {"n": 0}
+
+    def fake_make_complete_fn(settings, *, on_retry=None):
+        async def fake_complete(messages, tools):
+            calls["n"] += 1
+            return CompletionResult(content="Hi! Q1 here.")
+
+        return fake_complete
+
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
+    monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/live/session/{session_id}") as ws:
+        ws.receive_json()  # session_connected
+        ws.receive_json()  # opening
+
+        oversized = "x" * (live_api._MAX_UTTERANCE_LEN + 1)
+        ws.send_text(json.dumps({"type": "utterance_end", "text": oversized}))
+        rejected = ws.receive_json()
+        assert rejected["type"] == "input_rejected"
+        assert rejected["reason"]
+
+        # The turn loop was never invoked for the rejected message — only
+        # the opening call happened.
+        assert calls["n"] == 1
+
+        # The connection is still alive and works normally afterward.
+        ws.send_text('{"type": "utterance_end", "text": "a normal-length answer"}')
+        reply = ws.receive_json()
+        assert reply == {"type": "speak", "text": "Hi! Q1 here."}
+        ws.close()
+
+
+def test_ws_turn_rate_limit_trips_and_the_client_is_told(monkeypatch) -> None:
+    session_id = _make_ready_session()
+
+    def fake_make_complete_fn(settings, *, on_retry=None):
+        async def fake_complete(messages, tools):
+            return CompletionResult(content="reply")
+
+        return fake_complete
+
+    # A tiny budget so the test doesn't need 20 real turns to trip it —
+    # the limiter's OWN behavior is already proven by test_rate_limit.py;
+    # this test only proves the WS route is actually wired to it.
+    from proven_hire_agent.core.rate_limit import SlidingWindowRateLimiter
+
+    monkeypatch.setattr(live_api, "_ws_turn_limiter", SlidingWindowRateLimiter(max_events=1, window_sec=60.0))
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
+    monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/live/session/{session_id}") as ws:
+        ws.receive_json()  # session_connected
+        ws.receive_json()  # opening
+
+        ws.send_text('{"type": "utterance_end", "text": "first answer"}')
+        reply = ws.receive_json()
+        assert reply == {"type": "speak", "text": "reply"}
+
+        # Second turn within the same (tiny) window trips the limiter.
+        ws.send_text('{"type": "utterance_end", "text": "second answer, too fast"}')
+        limited = ws.receive_json()
+        assert limited["type"] == "rate_limited"
+        assert limited["retry_after_sec"] > 0
+
+        ws.close()
+
+
 # --- Phase 3: session ownership + first-class reconnect ----------------------
 
 

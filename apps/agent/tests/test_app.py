@@ -2,8 +2,10 @@
 
 from fastapi.testclient import TestClient
 
+from proven_hire_agent.api import prep as prep_api
 from proven_hire_agent.app import create_app
 from proven_hire_agent.core.persistence import repository as repo_mod
+from proven_hire_agent.core.rate_limit import SlidingWindowRateLimiter
 
 
 def _client() -> TestClient:
@@ -81,3 +83,25 @@ def test_prep_endpoint_rejects_garbage_input() -> None:
     assert payload["status"] == "rejected"
     assert payload["prep_warnings"], "rejection must surface warnings to the UI"
     assert payload["context"] is None
+
+
+def test_prep_endpoint_rate_limits_repeated_requests(monkeypatch) -> None:
+    """Phase 5 (backend hardening plan): confirms the route is actually
+    wired to the limiter — the limiter's OWN behavior is covered by
+    test_rate_limit.py. A tiny budget avoids needing real prep runs (each
+    is cheap/offline, but there's no reason to burn the real 5-per-5-min
+    budget just to prove the wiring)."""
+    monkeypatch.setattr(prep_api, "_prep_limiter", SlidingWindowRateLimiter(max_events=1, window_sec=300.0))
+    client = _client()
+    body = {
+        "cv_url": "https://example.com/cv.pdf",
+        "jd_text": "Senior backend engineer building distributed payment systems in Python.",
+        "company": "Acme Payments",
+        "language_mode": {"primary": "en", "mixed": False},
+    }
+    first = client.post("/api/prep", json=body)
+    assert first.status_code == 200
+
+    second = client.post("/api/prep", json=body)
+    assert second.status_code == 429
+    assert "Retry-After" in second.headers

@@ -33,13 +33,14 @@ import re
 from collections.abc import Awaitable, Callable
 
 import httpx
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict
 
 from ..core.config import Settings
 from ..core.deps import Deps, build_deps
 from ..core.logging import get_logger
 from ..core.observability import capture_error
+from ..core.rate_limit import SlidingWindowRateLimiter, client_ip
 from ..core.session_status import TERMINAL_STATUSES
 from ..live import orchestrator as orch
 from ..live import protocol, resilience
@@ -52,6 +53,26 @@ log = get_logger(__name__)
 
 router = APIRouter()
 ws_router = APIRouter()
+
+# Ingress rate limits (Phase 5, backend hardening plan) — genuinely new
+# code, no prior precedent. Module-level singletons, matching every other
+# process-wide state in this codebase (MemoryRepository etc.): a
+# per-request instance would reset its window on every call and limit
+# nothing. Scoped to the single-process assumption — see rate_limit.py.
+# Thresholds are a reasoned starting point (generous enough that no
+# legitimate candidate session should ever hit them), not tuned against
+# real traffic yet.
+_deepgram_token_limiter = SlidingWindowRateLimiter(max_events=10, window_sec=60.0)
+_tts_limiter = SlidingWindowRateLimiter(max_events=40, window_sec=60.0)
+# Keyed by session_id (not IP): each candidate turn is one real LLM call —
+# 20/min is generous for genuine back-and-forth conversation (well under
+# one every 3s) while still bounding a stuck/looping client from spamming
+# real cost indefinitely within a single session.
+_ws_turn_limiter = SlidingWindowRateLimiter(max_events=20, window_sec=60.0)
+# A spoken answer transcribed via STT; a few minutes of continuous speech
+# comfortably fits, same reasoning as the TTS/proctoring-events caps
+# elsewhere in this file.
+_MAX_UTTERANCE_LEN = 5_000
 
 _DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
 # Deepgram's grant endpoint's own default/max TTL differs by plan; 60s is
@@ -72,10 +93,17 @@ class DeepgramTokenResponse(BaseModel):
 
 
 @router.post("/api/live/deepgram-token", response_model=DeepgramTokenResponse)
-async def mint_deepgram_token() -> DeepgramTokenResponse:
+async def mint_deepgram_token(request: Request) -> DeepgramTokenResponse:
     settings = build_deps().settings
     if not settings.deepgram_api_key:
         raise HTTPException(status_code=503, detail="Deepgram is not configured")
+    ip = client_ip(request)
+    if not _deepgram_token_limiter.allow(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many token requests",
+            headers={"Retry-After": str(int(_deepgram_token_limiter.retry_after(ip)) + 1)},
+        )
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(
@@ -107,7 +135,7 @@ class TtsRequest(BaseModel):
 
 
 @router.post("/api/live/tts")
-async def synthesize_tts(req: TtsRequest):
+async def synthesize_tts(req: TtsRequest, request: Request):
     from fastapi import Response
 
     settings = build_deps().settings
@@ -115,6 +143,13 @@ async def synthesize_tts(req: TtsRequest):
         raise HTTPException(status_code=503, detail="Cartesia TTS is not configured")
     if len(req.text) > _MAX_TTS_TEXT_LEN:
         raise HTTPException(status_code=413, detail="Text too long for one TTS call")
+    ip = client_ip(request)
+    if not _tts_limiter.allow(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many TTS requests",
+            headers={"Retry-After": str(int(_tts_limiter.retry_after(ip)) + 1)},
+        )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
@@ -530,6 +565,22 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                 continue  # partial_transcript etc. — no server action in Phase 3
             text = (msg.get("text") or "").strip()
             if not text:
+                continue
+            if not _ws_turn_limiter.allow(session_id):
+                await websocket.send_json(
+                    protocol.rate_limited(_ws_turn_limiter.retry_after(session_id))
+                )
+                continue
+            if len(text) > _MAX_UTTERANCE_LEN:
+                # Rejected outright, never silently truncated — a truncated
+                # answer would be scored/recorded as something the
+                # candidate didn't actually say.
+                await websocket.send_json(
+                    protocol.input_rejected(
+                        "That message was too long — please keep answers to a "
+                        "reasonable length."
+                    )
+                )
                 continue
             result = await _safe_run_turn(text)
             if result is None:
