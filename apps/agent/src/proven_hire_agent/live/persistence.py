@@ -34,6 +34,7 @@ import httpx
 from ..core.config import Settings
 from ..core.deps import Deps
 from ..core.logging import get_logger
+from ..core.observability import capture_error
 from ..shared_models import InterviewContext, ScoreRequest
 from . import state
 from .state import InterviewUserdata
@@ -100,8 +101,9 @@ async def persist_via_api(
         if new_version is not None:
             ud.version = new_version
         return True
-    except Exception:
+    except Exception as exc:
         log.exception("live: live-result POST failed for %s", session_id)
+        capture_error(exc)
         return False
 
 
@@ -175,7 +177,7 @@ async def persist_via_repo(session_id: str, ud: InterviewUserdata, deps: Deps, *
             status=None if has_answers else "no_answers",
             expected_version=ud.version,
         )
-    except Exception:
+    except Exception as exc:
         # A hard failure (not a version conflict — those return None cleanly
         # below), most likely an I/O error talking to the store itself.
         # Best-effort: mark the session errored so a later read shows an
@@ -186,10 +188,12 @@ async def persist_via_repo(session_id: str, ud: InterviewUserdata, deps: Deps, *
             "attempting to mark error",
             session_id,
         )
+        capture_error(exc)
         try:
             await deps.repo.update_status(session_id, "error")
-        except Exception:
+        except Exception as inner_exc:
             log.exception("live: update_status(error) failed for %s", session_id)
+            capture_error(inner_exc)
         return False
     if new_version is None:
         log.warning(
@@ -215,8 +219,9 @@ async def trigger_scoring(session_id: str, settings: Settings) -> None:
                 json=req.model_dump(),
                 headers=_internal_headers(settings),
             )
-    except Exception:
+    except Exception as exc:
         log.exception("live: scoring trigger failed for %s", session_id)
+        capture_error(exc)
 
 
 async def persist_and_score(

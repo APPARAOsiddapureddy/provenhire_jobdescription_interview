@@ -39,16 +39,28 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
+from ..core.logging import get_logger
 from . import state
 from .state import InterviewUserdata
 
 if TYPE_CHECKING:
     from ..shared_models import PlannedQuestion
 
+log = get_logger(__name__)
+
 Persona = Literal["interviewer", "coding", "behavioral"]
 
 _MAX_TOOL_ROUNDS = 4  # bounded loop guard — a tool call can request another
 # tool call (e.g. get_difficulty_hint then submit_answer), but never forever.
+
+# Absolute last resort if even the forced no-tools completion (see _run_loop's
+# bounded-loop safety valve) also fails — the candidate must never experience
+# total silence after speaking. Deliberately generic/English-only: reaching
+# this line means the model itself is unavailable, so there is no live
+# language-aware generation to draw from.
+_SAFETY_VALVE_FALLBACK_LINE = (
+    "Sorry, I'm having a little trouble right now — could you give me just a moment?"
+)
 
 
 @dataclass
@@ -480,16 +492,62 @@ async def _run_loop(session: LiveTurnSession, complete_fn: CompleteFn) -> TurnRe
             if fn is None:
                 tool_result = f"Unknown tool: {tc.name}"
             else:
-                tool_result = await fn(session, **tc.arguments)
+                try:
+                    tool_result = await fn(session, **tc.arguments)
+                except TypeError as exc:
+                    # The model called a real tool with missing/unexpected
+                    # arguments — including api/live.py's malformed-JSON
+                    # sentinel, which is deliberately shaped to mismatch
+                    # every real tool signature and land here. Feed a
+                    # structured error back so it can retry correctly,
+                    # instead of this crashing the whole turn.
+                    log.warning(
+                        "live: tool %s called with invalid arguments %r: %s",
+                        tc.name,
+                        tc.arguments,
+                        exc,
+                    )
+                    tool_result = (
+                        f"Error calling {tc.name}: invalid arguments. Check the "
+                        "required parameters and try again."
+                    )
+                except Exception:
+                    # A bug in the tool implementation itself, or an
+                    # unexpected failure inside it — never let this crash
+                    # the turn loop, and never echo the raw exception back
+                    # to the model (it could contain internal detail).
+                    log.exception("live: tool %s raised an unexpected error", tc.name)
+                    tool_result = f"Error calling {tc.name}: an internal error occurred. Try a different approach."
             session.messages.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": tool_result}
             )
         # Loop again: the model gets the tool results and either replies in
         # text or calls another tool (e.g. get_difficulty_hint then submit_answer).
 
-    # Bounded-loop safety valve: never hang a turn forever on a model stuck
-    # calling tools. Speak nothing rather than silently drop the turn.
-    return TurnResult(reply_text="", should_end=session.should_end)
+    # Bounded-loop safety valve: a model stuck calling tools forever must
+    # never leave the candidate in silence. Force ONE final completion with
+    # no tools offered, so it has to produce a real spoken reply; if even
+    # that fails, fall back to a generic line rather than empty text.
+    log.warning(
+        "live: tool-round budget (%d) exhausted for session %s; forcing a "
+        "final no-tools completion",
+        _MAX_TOOL_ROUNDS,
+        session.ud.session_id,
+    )
+    messages = [{"role": "system", "content": build_instructions(session)}, *session.messages]
+    try:
+        final = await complete_fn(messages, [])
+        text = final.content or _SAFETY_VALVE_FALLBACK_LINE
+    except Exception:
+        log.exception(
+            "live: forced final completion also failed for session %s after "
+            "tool-round exhaustion",
+            session.ud.session_id,
+        )
+        text = _SAFETY_VALVE_FALLBACK_LINE
+    session.messages.append({"role": "assistant", "content": text})
+    state.add_turn(session.ud, "assistant", text)
+    return TurnResult(reply_text=text, should_end=session.should_end)
 
 
 async def open_interview(session: LiveTurnSession, complete_fn: CompleteFn) -> TurnResult:

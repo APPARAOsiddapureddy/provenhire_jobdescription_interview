@@ -22,12 +22,19 @@ from .api import session as session_api
 from .api.auth import require_internal_secret
 from .core.config import get_settings
 from .core.logging import get_logger
+from .core.observability import init_observability
 
 log = get_logger(__name__)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # Zero-config no-op unless SENTRY_DSN/LANGFUSE_* are set (see
+    # core/observability.py) — this is the one call site that was missing;
+    # the module itself was already fully built (Phase 8 of the backend
+    # hardening plan).
+    init_observability(get_settings())
+
     # Every in-process invariant added by the live-interview hardening work
     # (the connect-time asyncio.Lock in api/live.py, the in-process rate
     # limiter) depends on this process being the ONLY writer for whatever

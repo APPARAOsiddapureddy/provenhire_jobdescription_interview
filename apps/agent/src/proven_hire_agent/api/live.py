@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import json
 import re
+from collections.abc import Awaitable, Callable
 
 import httpx
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -38,11 +39,12 @@ from pydantic import BaseModel, ConfigDict
 from ..core.config import Settings
 from ..core.deps import Deps, build_deps
 from ..core.logging import get_logger
+from ..core.observability import capture_error
 from ..core.session_status import TERMINAL_STATUSES
 from ..live import orchestrator as orch
-from ..live import protocol
+from ..live import protocol, resilience
 from ..live.guard import SessionGuard, wrap_up_line
-from ..live.orchestrator import CompleteFn, CompletionResult, LiveTurnSession, ToolCall
+from ..live.orchestrator import CompleteFn, CompletionResult, LiveTurnSession, ToolCall, TurnResult
 from ..live.persistence import flush_checkpoint, persist_and_score
 from ..live.state import InterviewUserdata
 
@@ -176,23 +178,36 @@ def _clean_harmony_leak(text: str | None) -> str | None:
     return cleaned.strip()
 
 
-def _make_openai_complete_fn(settings: Settings) -> CompleteFn:
-    """Real CompleteFn for the live orchestrator (English-first v1 — see the
-    rework plan; a Gemini adapter is explicitly deferred).
+# Every OpenAI-API-compatible backend the live loop can use. Fixed failover
+# priority order (Phase 4): whichever is primary (settings.live_llm_provider)
+# is tried first; the others are tried in THIS order, skipping any without a
+# configured key. OpenAI first among the fallbacks since it's the most
+# reliable/well-provisioned option when it isn't already primary.
+_LIVE_PROVIDERS: tuple[str, ...] = ("openai", "together", "cerebras", "groq")
 
-    Backend selectable via ``settings.live_llm_provider`` — "openai" (default),
-    "cerebras", "groq", or "together". The three alternates are OpenAI-API-
-    compatible fast/cheap inference providers (same SDK, same tool-calling
-    shape, just a ``base_url``/key/model swap) measured materially faster for
-    this specific tool-calling loop (~7-9s -> ~2-3s per turn) at much lower
-    cost, hence the default-off opt-in rather than replacing OpenAI outright.
-    Three alternates are wired in because account-activation issues (billing
-    holds, signup fraud flags) turned out to be the real obstacle in
-    practice, not model/API availability.
+
+def _live_provider_configured(settings: Settings, provider: str) -> bool:
+    if provider == "cerebras":
+        return bool(settings.cerebras_api_key)
+    if provider == "groq":
+        return bool(settings.groq_api_key)
+    if provider == "together":
+        return bool(settings.together_api_key)
+    return bool(settings.openai_api_key)
+
+
+def _make_provider_complete_fn(settings: Settings, provider: str) -> CompleteFn:
+    """Real CompleteFn for ONE provider — "openai", "cerebras", "groq", or
+    "together". All four are OpenAI-API-compatible (same SDK, same
+    tool-calling shape, just a ``base_url``/key/model swap); the three
+    alternates to OpenAI were wired in because account-activation issues
+    (billing holds, signup fraud flags) turned out to be the real obstacle
+    in practice, not model/API availability, and are measured materially
+    faster for this specific tool-calling loop (~7-9s -> ~2-3s per turn).
+    Raises ``RuntimeError`` if ``provider``'s key isn't configured.
     """
     from openai import AsyncOpenAI
 
-    provider = (settings.live_llm_provider or "openai").lower()
     # gpt-oss's reasoning_effort trades reasoning depth for latency (and,
     # empirically, fewer malformed Harmony-format leaks — see
     # _clean_harmony_leak above) — "low" fits a real-time voice loop where
@@ -228,13 +243,57 @@ def _make_openai_complete_fn(settings: Settings) -> CompleteFn:
             timeout=settings.llm_call_timeout_sec,
         )
         choice = resp.choices[0].message
-        tool_calls = [
-            ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments or "{}"))
-            for tc in (choice.tool_calls or [])
-        ]
+        tool_calls: list[ToolCall] = []
+        for tc in choice.tool_calls or []:
+            try:
+                arguments = json.loads(tc.function.arguments or "{}")
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool arguments must be a JSON object")
+            except (json.JSONDecodeError, TypeError):
+                # Malformed tool-call JSON must not crash the whole
+                # completion (Phase 4): substitute a sentinel that will
+                # naturally mismatch every real tool's signature, so
+                # orchestrator.py's existing TypeError handling turns it
+                # into a structured tool-error fed back to the model
+                # instead of this exception propagating and ending the
+                # session.
+                log.warning(
+                    "live: tool call %s had malformed JSON arguments: %r",
+                    tc.function.name,
+                    tc.function.arguments,
+                )
+                arguments = {"_malformed_tool_arguments": tc.function.arguments}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
         return CompletionResult(content=_clean_harmony_leak(choice.content), tool_calls=tool_calls)
 
     return complete
+
+
+def _make_live_complete_fn(
+    settings: Settings, *, on_retry: Callable[[str, int], Awaitable[None]] | None = None
+) -> CompleteFn:
+    """The live orchestrator's real CompleteFn (Phase 4): the primary
+    provider (``settings.live_llm_provider``) plus retry/backoff, with
+    automatic failover to any OTHER fully-configured live provider if the
+    primary's own retry budget is exhausted — see ``live/resilience.py``.
+
+    Raises ``RuntimeError`` only if the PRIMARY provider itself isn't
+    configured, matching the old single-provider function's exact contract:
+    a misconfigured primary is a hard connect-time failure, not something
+    silently degraded to whatever fallback happens to be available.
+    """
+    primary = (settings.live_llm_provider or "openai").lower()
+    if primary not in _LIVE_PROVIDERS:
+        primary = "openai"
+    primary_fn = _make_provider_complete_fn(settings, primary)  # raises RuntimeError if misconfigured
+
+    providers: list[tuple[str, CompleteFn]] = [(primary, primary_fn)]
+    for name in _LIVE_PROVIDERS:
+        if name == primary or not _live_provider_configured(settings, name):
+            continue
+        providers.append((name, _make_provider_complete_fn(settings, name)))
+
+    return resilience.make_resilient_complete_fn(providers, on_retry=on_retry)
 
 
 class _WsSessionFacade:
@@ -326,8 +385,15 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4409)
         return
 
+    async def _on_llm_retry(provider: str, attempt: int) -> None:
+        # Candidate-safe: the event carries only the attempt number, never
+        # the provider name (internal infra detail — see Phase 6's
+        # candidate-safe-error posture).
+        with contextlib.suppress(Exception):
+            await websocket.send_json(protocol.llm_retrying(attempt))
+
     try:
-        complete_fn = _make_openai_complete_fn(deps.settings)
+        complete_fn = _make_live_complete_fn(deps.settings, on_retry=_on_llm_retry)
     except RuntimeError as exc:
         await websocket.send_json(protocol.error(str(exc)))
         await websocket.close(code=1011)
@@ -370,8 +436,9 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                 expected_version=ud.version,
                 conversation={"persona": session.persona, "messages": session.messages},
             )
-        except Exception:
+        except Exception as exc:
             log.exception("live: checkpoint failed for %s", session_id)
+            capture_error(exc)
         else:
             if new_version is not None:
                 ud.version = new_version
@@ -394,6 +461,30 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
         await persist_and_score(session_id, ud, deps, background_score=True)
         await deps.live_session_repo.delete(session_id)
 
+    async def _safe_open_interview() -> TurnResult | None:
+        """None means every provider's full retry budget is exhausted
+        (Phase 4) — the caller decides how to degrade gracefully instead of
+        this propagating to the outer handler and ending the interview."""
+        try:
+            return await orch.open_interview(session, complete_fn)
+        except Exception as exc:
+            log.exception(
+                "live: opening turn failed for %s (retries/failover exhausted)", session_id
+            )
+            capture_error(exc)
+            return None
+
+    async def _safe_run_turn(text: str) -> TurnResult | None:
+        """Same contract as _safe_open_interview, for a candidate turn."""
+        try:
+            return await orch.run_turn(session, text, complete_fn)
+        except Exception as exc:
+            log.exception(
+                "live: turn failed for %s (retries/failover exhausted)", session_id
+            )
+            capture_error(exc)
+            return None
+
     try:
         if is_resume:
             # Skip open_interview()'s greeting entirely — the candidate
@@ -404,7 +495,22 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
             await websocket.send_json(protocol.session_resumed())
         else:
             await websocket.send_json(protocol.session_connected())
-            opening = await orch.open_interview(session, complete_fn)
+            opening = await _safe_open_interview()
+            if opening is None:
+                # Every provider failed to even open the interview — nothing
+                # has been checkpointed yet, so there's no partial state to
+                # protect. Tell the candidate plainly and let them reconnect
+                # (Phase 3's is_resume stays False, so a retry cleanly
+                # attempts the same opening flow again) rather than pretend
+                # the connection is still useful.
+                await websocket.send_json(
+                    protocol.temporary_failure(
+                        "We're having trouble starting the interview right now. "
+                        "Please try reconnecting in a moment."
+                    )
+                )
+                await websocket.close(code=1011)
+                return
             await websocket.send_json(protocol.speak(opening.reply_text))
             # Durably save turn-0 state immediately: without this, a
             # candidate who disconnects right after the greeting — before
@@ -425,7 +531,20 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
             text = (msg.get("text") or "").strip()
             if not text:
                 continue
-            result = await orch.run_turn(session, text, complete_fn)
+            result = await _safe_run_turn(text)
+            if result is None:
+                # Every provider failed for THIS turn — the candidate's
+                # utterance is already recorded in the transcript (state.
+                # add_turn ran before the failed completion call), so
+                # nothing is lost; let them try again rather than ending a
+                # session that's otherwise perfectly healthy.
+                await websocket.send_json(
+                    protocol.temporary_failure(
+                        "Sorry, I'm having trouble right now. Could you say that again "
+                        "in a moment?"
+                    )
+                )
+                continue
             if result.reply_text:
                 await websocket.send_json(protocol.speak(result.reply_text))
             await _checkpoint()
@@ -441,7 +560,14 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
             await websocket.close(code=1000)
     except WebSocketDisconnect:
         log.info("live: session %s disconnected", session_id)
-    except Exception:
+    except Exception as exc:
+        # Anything reaching here is NOT an LLM completion failure (those are
+        # already contained by _safe_open_interview/_safe_run_turn above) —
+        # a genuine bug or an unexpected transport error. Still never let it
+        # go unreported: log with full context and forward to Sentry/etc. if
+        # configured (Phase 8), same as every other previously-silent
+        # exception site in this handler.
         log.exception("live: session %s WS handler error", session_id)
+        capture_error(exc)
     finally:
         await _shutdown_sequence()

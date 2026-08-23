@@ -173,20 +173,159 @@ def test_run_turn_executes_a_tool_call_then_replies() -> None:
     assert "tool" in roles
 
 
-def test_run_loop_bounded_safety_valve_never_hangs() -> None:
-    """A model that keeps calling tools forever must not hang the turn —
-    the bounded loop stops after _MAX_TOOL_ROUNDS and returns an empty reply
-    rather than looping indefinitely."""
+# --- tool-call hardening (Phase 4, backend hardening plan) -------------------
+
+
+def test_run_turn_missing_required_tool_argument_does_not_crash_the_turn() -> None:
+    """submit_answer requires 'answer' — a model call that omits it must
+    become a structured tool-error fed back to the model, never a raised
+    TypeError that ends the whole turn/session."""
+    session = _session()
+    calls = {"n": 0}
+
+    async def fake_complete(messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return CompletionResult(
+                tool_calls=[ToolCall(id="call_1", name="submit_answer", arguments={})]
+            )
+        return CompletionResult(content="Let me ask that differently.")
+
+    result = asyncio.run(orch.run_turn(session, "I built a ledger service.", fake_complete))
+
+    assert calls["n"] == 2  # the loop continued instead of crashing
+    assert result.reply_text == "Let me ask that differently."
+    assert session.ud.ctx.answers == []  # the malformed call never actually saved anything
+    tool_messages = [m for m in session.messages if m["role"] == "tool"]
+    assert len(tool_messages) == 1
+    assert "invalid arguments" in tool_messages[0]["content"]
+
+
+def test_run_turn_unknown_tool_name_does_not_crash_the_turn() -> None:
+    """A tool name the registry doesn't recognize (a model hallucination, or
+    a schema drift) must be reported back, not raise KeyError/crash."""
+    session = _session()
+    calls = {"n": 0}
+
+    async def fake_complete(messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return CompletionResult(
+                tool_calls=[ToolCall(id="call_1", name="delete_everything", arguments={})]
+            )
+        return CompletionResult(content="Sorry, let's continue.")
+
+    result = asyncio.run(orch.run_turn(session, "an answer", fake_complete))
+
+    assert calls["n"] == 2
+    assert result.reply_text == "Sorry, let's continue."
+    tool_messages = [m for m in session.messages if m["role"] == "tool"]
+    assert tool_messages[0]["content"] == "Unknown tool: delete_everything"
+
+
+def test_run_turn_malformed_tool_call_json_sentinel_does_not_crash_the_turn() -> None:
+    """api/live.py substitutes a sentinel dict (shaped to mismatch every
+    real tool signature) when the model's tool-call JSON fails to parse —
+    this proves the orchestrator's OWN handling of that sentinel shape,
+    independent of api/live.py's own JSON-decode test coverage."""
+    session = _session()
+    calls = {"n": 0}
+
+    async def fake_complete(messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return CompletionResult(
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="submit_answer",
+                        arguments={"_malformed_tool_arguments": "{answer: not valid json"},
+                    )
+                ]
+            )
+        return CompletionResult(content="Could you say that again?")
+
+    result = asyncio.run(orch.run_turn(session, "an answer", fake_complete))
+
+    assert calls["n"] == 2
+    assert result.reply_text == "Could you say that again?"
+    assert session.ud.ctx.answers == []
+
+
+def test_run_turn_bug_inside_a_tool_implementation_does_not_crash_the_turn() -> None:
+    """A tool function that raises something other than TypeError (a genuine
+    bug, or an unexpected internal failure) must ALSO be contained — the
+    exact exception text must never reach the model's context."""
+    session = _session()
+    calls = {"n": 0}
+
+    async def _broken_tool(session, **kwargs):
+        raise ValueError("a secret internal detail that must not leak")
+
+    import proven_hire_agent.live.orchestrator as orch_module
+
+    original = orch_module.TOOL_REGISTRY.get("get_difficulty_hint")
+    orch_module.TOOL_REGISTRY["get_difficulty_hint"] = _broken_tool
+    try:
+
+        async def fake_complete(messages, tools):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return CompletionResult(
+                    tool_calls=[ToolCall(id="call_1", name="get_difficulty_hint", arguments={})]
+                )
+            return CompletionResult(content="Moving on.")
+
+        result = asyncio.run(orch.run_turn(session, "an answer", fake_complete))
+    finally:
+        assert original is not None
+        orch_module.TOOL_REGISTRY["get_difficulty_hint"] = original
+
+    assert calls["n"] == 2
+    assert result.reply_text == "Moving on."
+    tool_messages = [m for m in session.messages if m["role"] == "tool"]
+    assert "secret internal detail" not in tool_messages[0]["content"]
+    assert "internal error occurred" in tool_messages[0]["content"]
+
+
+def test_run_loop_bounded_safety_valve_forces_a_real_reply_instead_of_silence() -> None:
+    """A model that keeps calling tools forever must not hang the turn — the
+    bounded loop stops after _MAX_TOOL_ROUNDS and forces ONE final
+    completion with no tools offered, so the candidate gets an actual
+    spoken reply (Phase 4) instead of the old silent empty return (which
+    the candidate experienced as "I spoke, the server worked, then
+    nothing")."""
     session = _session()
 
     async def fake_complete(messages, tools):
+        if not tools:  # the forced final no-tools call
+            return CompletionResult(content="Let's move on to the next question.")
         return CompletionResult(
             tool_calls=[ToolCall(id="call_x", name="get_difficulty_hint", arguments={})]
         )
 
     result = asyncio.run(orch.run_turn(session, "an answer", fake_complete))
 
-    assert result.reply_text == ""
+    assert result.reply_text == "Let's move on to the next question."
+
+
+def test_run_loop_bounded_safety_valve_falls_back_to_a_generic_line_if_the_forced_call_also_fails() -> None:
+    """If even the forced final completion fails (every provider/retry
+    exhausted), the candidate still gets SOME spoken line — never empty
+    text and never a raised exception out of the turn loop."""
+    session = _session()
+
+    async def fake_complete(messages, tools):
+        if not tools:  # the forced final no-tools call
+            raise RuntimeError("provider unavailable")
+        return CompletionResult(
+            tool_calls=[ToolCall(id="call_x", name="get_difficulty_hint", arguments={})]
+        )
+
+    result = asyncio.run(orch.run_turn(session, "an answer", fake_complete))
+
+    assert result.reply_text
+    assert result.reply_text == orch._SAFETY_VALVE_FALLBACK_LINE
 
 
 def test_end_interview_tool_call_propagates_should_end_through_the_loop() -> None:
@@ -284,12 +423,16 @@ def test_run_turn_transcript_tags_assistant_reply_with_new_question_after_advanc
     assert assistant_turns[-1]["question_id"] == q2.id  # new question, now current
 
 
-def test_run_loop_bounded_safety_valve_does_not_record_empty_assistant_turn() -> None:
-    """The bounded-loop safety valve returns an empty reply — nothing was
-    actually said, so nothing should land in the transcript for it."""
+def test_run_loop_bounded_safety_valve_records_the_forced_reply_in_transcript() -> None:
+    """The bounded-loop safety valve's forced final reply IS real spoken
+    text (Phase 4) — it must be tagged into the transcript exactly like any
+    other assistant turn, so answer-recovery/turn-count-ceiling stay
+    accurate."""
     session = _session()
 
     async def fake_complete(messages, tools):
+        if not tools:
+            return CompletionResult(content="Let's move on to the next question.")
         return CompletionResult(
             tool_calls=[ToolCall(id="call_x", name="get_difficulty_hint", arguments={})]
         )
@@ -297,4 +440,5 @@ def test_run_loop_bounded_safety_valve_does_not_record_empty_assistant_turn() ->
     asyncio.run(orch.run_turn(session, "an answer", fake_complete))
 
     assistant_turns = [t for t in session.ud.transcript if t["role"] == "assistant"]
-    assert assistant_turns == []
+    assert len(assistant_turns) == 1
+    assert assistant_turns[0]["text"] == "Let's move on to the next question."

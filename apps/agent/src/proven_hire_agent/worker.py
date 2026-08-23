@@ -32,6 +32,7 @@ from livekit.agents import (
 from .core.config import get_settings
 from .core.deps import build_deps
 from .core.logging import get_logger
+from .core.observability import init_observability
 from .live import state
 from .live.director import Director
 from .live.flusher import TranscriptFlusher
@@ -825,6 +826,7 @@ def main() -> None:
     # livekit-agents reads LIVEKIT_URL/API_KEY/API_SECRET from os.environ; we keep
     # them in Settings (.env), so pass them through explicitly to WorkerOptions.
     settings = get_settings()
+    init_observability(settings)  # zero-config no-op unless SENTRY_DSN/LANGFUSE_* set
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,

@@ -84,7 +84,7 @@ def test_ws_completes_one_full_turn_end_to_end(monkeypatch) -> None:
 
     call_count = {"n": 0}
 
-    def fake_make_complete_fn(settings):
+    def fake_make_complete_fn(settings, *, on_retry=None):
         async def fake_complete(messages, tools):
             call_count["n"] += 1
             if call_count["n"] == 1:
@@ -106,7 +106,7 @@ def test_ws_completes_one_full_turn_end_to_end(monkeypatch) -> None:
 
         return fake_complete
 
-    monkeypatch.setattr(live_api, "_make_openai_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
     monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
     monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
     monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
@@ -158,7 +158,7 @@ def test_ws_end_interview_tool_call_closes_the_socket(monkeypatch) -> None:
     session_id = _make_ready_session()
     calls = {"n": 0}
 
-    def fake_make_complete_fn(settings):
+    def fake_make_complete_fn(settings, *, on_retry=None):
         async def fake_complete(messages, tools):
             calls["n"] += 1
             if calls["n"] == 1:
@@ -171,7 +171,7 @@ def test_ws_end_interview_tool_call_closes_the_socket(monkeypatch) -> None:
 
         return fake_complete
 
-    monkeypatch.setattr(live_api, "_make_openai_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
     monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
     monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
     monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
@@ -191,6 +191,83 @@ def test_ws_end_interview_tool_call_closes_the_socket(monkeypatch) -> None:
         except Exception:
             hung_open = False
         assert not hung_open
+
+
+# --- Phase 4: LLM resilience — graceful degradation at the WS level ----------
+
+
+def test_ws_turn_failure_sends_temporary_failure_and_the_connection_survives(monkeypatch) -> None:
+    """When a candidate turn's completion call fails outright (every
+    provider/retry exhausted — simulated here by a fake that just raises),
+    the candidate gets a temporary_failure event and CAN KEEP TALKING — the
+    session must not silently die over one bad turn."""
+    session_id = _make_ready_session()
+    calls = {"n": 0}
+
+    def fake_make_complete_fn(settings, *, on_retry=None):
+        async def fake_complete(messages, tools):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return CompletionResult(content="Hi! Q1 here.")
+            if calls["n"] == 2:
+                raise TimeoutError("every provider exhausted")
+            return CompletionResult(content="Good, let's continue.")
+
+        return fake_complete
+
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
+    monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/live/session/{session_id}") as ws:
+        ws.receive_json()  # session_connected
+        ws.receive_json()  # opening
+
+        ws.send_text('{"type": "utterance_end", "text": "my first answer"}')
+        failure = ws.receive_json()
+        assert failure["type"] == "temporary_failure"
+        assert failure["message"]  # a real, candidate-facing message
+
+        # The connection is still alive: try again.
+        ws.send_text('{"type": "utterance_end", "text": "let me try again"}')
+        reply = ws.receive_json()
+        assert reply == {"type": "speak", "text": "Good, let's continue."}
+        ws.close()
+
+
+def test_ws_opening_failure_sends_temporary_failure_and_closes(monkeypatch) -> None:
+    """If EVERY provider fails on the very opening turn, nothing has been
+    checkpointed yet — the candidate is told plainly and the connection
+    closes (1011) so they can reconnect and retry cleanly, rather than the
+    server pretending the connection is still useful."""
+    session_id = _make_ready_session()
+
+    def fake_make_complete_fn(settings, *, on_retry=None):
+        async def fake_complete(messages, tools):
+            raise ConnectionError("every provider exhausted")
+
+        return fake_complete
+
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
+    monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
+    monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
+
+    client = TestClient(app)
+    try:
+        with client.websocket_connect(f"/api/live/session/{session_id}") as ws:
+            connected = ws.receive_json()
+            assert connected == {"type": "session_connected"}
+            failure = ws.receive_json()
+            assert failure["type"] == "temporary_failure"
+            # Server closes right after — further reads should raise.
+            ws.receive_json()
+        raised = False
+    except Exception:
+        raised = True
+    assert raised
 
 
 # --- Phase 3: session ownership + first-class reconnect ----------------------
@@ -221,7 +298,7 @@ def test_ws_second_concurrent_connection_gets_session_conflict(monkeypatch) -> N
     session_id = _make_ready_session()
     calls = {"n": 0}
 
-    def fake_make_complete_fn(settings):
+    def fake_make_complete_fn(settings, *, on_retry=None):
         async def fake_complete(messages, tools):
             calls["n"] += 1
             if calls["n"] == 1:
@@ -230,7 +307,7 @@ def test_ws_second_concurrent_connection_gets_session_conflict(monkeypatch) -> N
 
         return fake_complete
 
-    monkeypatch.setattr(live_api, "_make_openai_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
     monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
     monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
     monkeypatch.setattr(live_api, "flush_checkpoint", _no_op_flush_checkpoint)
@@ -268,7 +345,7 @@ def test_ws_reconnect_resumes_conversation_without_re_greeting(monkeypatch) -> N
 
     calls: list[list[dict]] = []
 
-    def fake_make_complete_fn(settings):
+    def fake_make_complete_fn(settings, *, on_retry=None):
         async def fake_complete(messages, tools):
             calls.append(messages)
             n = len(calls)
@@ -308,7 +385,7 @@ def test_ws_reconnect_resumes_conversation_without_re_greeting(monkeypatch) -> N
             conversation=conversation,
         )
 
-    monkeypatch.setattr(live_api, "_make_openai_complete_fn", fake_make_complete_fn)
+    monkeypatch.setattr(live_api, "_make_live_complete_fn", fake_make_complete_fn)
     monkeypatch.setattr(live_persistence, "persist_via_api", _fast_fail_persist_via_api)
     monkeypatch.setattr(live_persistence, "trigger_scoring", _no_op_trigger_scoring)
     monkeypatch.setattr(live_api, "flush_checkpoint", _in_process_flush_checkpoint)
