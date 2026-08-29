@@ -312,18 +312,18 @@ class FallbackLLM:
     async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
         try:
             return await self._primary.complete_json(system=system, user=user, schema=schema)
-        except Exception as primary_exc:  # noqa: BLE001 - fall through to fallbacks below
+        except Exception:
             for fallback in self._fallbacks:
                 try:
                     return await fallback.complete_json(system=system, user=user, schema=schema)
-                except Exception:  # noqa: BLE001 - try the next fallback
+                except Exception:  # noqa: BLE001, S112 - try the next fallback
                     continue
             log.warning(
                 "FallbackLLM: primary and all %d fallback(s) failed; re-raising the "
                 "primary's error.",
                 len(self._fallbacks),
             )
-            raise primary_exc
+            raise
 
 
 # Fixed priority order fallbacks are tried in, skipping whichever is primary.
