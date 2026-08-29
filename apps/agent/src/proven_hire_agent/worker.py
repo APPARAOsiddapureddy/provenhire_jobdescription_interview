@@ -40,7 +40,7 @@ from .live.guard import SessionGuard
 from .live.guard import wrap_up_line as guard_wrap_up_line
 from .live.interviewer import Interviewer
 from .live.state import InterviewUserdata
-from .shared_models import InterviewContext, RoomMetadata, ScoreRequest
+from .shared_models import InterviewContext, RoomMetadata
 
 log = get_logger(__name__)
 

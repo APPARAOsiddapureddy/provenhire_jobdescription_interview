@@ -53,7 +53,7 @@ async def _no_op_trigger_scoring(session_id, settings) -> None:
     makes a real httpx call (to /api/score) that hangs the same way in this
     test environment; scoring itself is exercised by post/ pipeline tests
     elsewhere, not the concern of this WS-plumbing test."""
-    return None
+    return
 
 
 async def _no_op_flush_checkpoint(
@@ -65,7 +65,7 @@ async def _no_op_flush_checkpoint(
     ``from ..live.persistence import flush_checkpoint``, which binds its own
     name in live_api's namespace at import time; patching the origin module
     doesn't reach that already-bound reference."""
-    return None
+    return
 
 
 def test_ws_misconfigured_provider_never_leaks_the_env_var_name(monkeypatch) -> None:
@@ -91,7 +91,7 @@ def test_ws_misconfigured_provider_never_leaks_the_env_var_name(monkeypatch) -> 
             assert failure["message"]  # still a real, non-empty message
             ws.receive_json()  # server closes (1011) right after
         raised = False
-    except Exception:
+    except Exception:  # noqa: BLE001
         raised = True
     assert raised
 
@@ -102,7 +102,7 @@ def test_ws_rejects_unknown_session() -> None:
         with client.websocket_connect("/api/live/session/sess_does_not_exist"):
             pass
         raised = False
-    except Exception:
+    except Exception:  # noqa: BLE001
         raised = True
     assert raised  # server closes with 4404 before accept; client sees a close
 
@@ -216,7 +216,7 @@ def test_ws_end_interview_tool_call_closes_the_socket(monkeypatch) -> None:
         try:
             ws.receive_json()
             hung_open = True
-        except Exception:
+        except Exception:  # noqa: BLE001
             hung_open = False
         assert not hung_open
 
@@ -293,7 +293,7 @@ def test_ws_opening_failure_sends_temporary_failure_and_closes(monkeypatch) -> N
             # Server closes right after — further reads should raise.
             ws.receive_json()
         raised = False
-    except Exception:
+    except Exception:  # noqa: BLE001
         raised = True
     assert raised
 
@@ -393,7 +393,7 @@ def test_ws_refuses_connection_to_a_terminal_session() -> None:
         with client.websocket_connect(f"/api/live/session/{session_id}"):
             pass
         raised = False
-    except Exception:
+    except Exception:  # noqa: BLE001
         raised = True
     assert raised  # server closes with 4409 before accept; client sees a close
 
@@ -431,7 +431,7 @@ def test_ws_second_concurrent_connection_gets_session_conflict(monkeypatch) -> N
             try:
                 ws2.receive_json()
                 still_open = True
-            except Exception:
+            except Exception:  # noqa: BLE001
                 still_open = False
             assert not still_open
 

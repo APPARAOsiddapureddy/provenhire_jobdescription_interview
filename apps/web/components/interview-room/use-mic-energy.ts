@@ -11,7 +11,10 @@
 
 import * as React from "react";
 
-export function useMicEnergy(active: boolean, track: MediaStreamTrack | null): number {
+export function useMicEnergy(
+  active: boolean,
+  track: MediaStreamTrack | null,
+): number {
   const [energy, setEnergy] = React.useState(0);
 
   React.useEffect(() => {

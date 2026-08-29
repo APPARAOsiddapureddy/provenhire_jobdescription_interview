@@ -21,14 +21,14 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 _DEFAULTS: dict[str, str] = {
-    "ai_behavior_analysis": "off",
-    "camera_required": "off",
+    "ai_behavior_analysis": "strict",
+    "camera_required": "strict",
     "copy_paste_detection": "off",
     "devtools_detection": "off",
     "fullscreen_required": "off",
     "microphone_monitoring": "off",
-    "camera_ai_detection": "off",
-    "three_strike_auto_end": "off",
+    "camera_ai_detection": "strict",
+    "three_strike_auto_end": "strict",
     "screen_recording_enabled": "off",
     "tab_switching_detection": "off",
 }

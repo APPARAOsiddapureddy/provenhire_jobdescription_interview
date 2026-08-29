@@ -18,7 +18,8 @@
 
 import { isLikelyAiEcho } from "./interview-session/echo";
 
-export type FloorState = "IDLE" | "AI_SPEAKING" | "AI_THINKING" | "USER_SPEAKING";
+export type FloorState =
+  "IDLE" | "AI_SPEAKING" | "AI_THINKING" | "USER_SPEAKING";
 
 export type InterviewSessionErrorKind =
   | "mic_permission_denied"
@@ -97,7 +98,11 @@ type CoordinationMessage =
  * terminalMessageHandled below) or a genuine unexpected drop. */
 const NORMAL_CLOSE_CODE = 1000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms);
     promise.then(
@@ -113,7 +118,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   });
 }
 
-function openWebSocket(url: string, protocols?: string | string[]): Promise<WebSocket> {
+function openWebSocket(
+  url: string,
+  protocols?: string | string[],
+): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
     const cleanup = () => {
@@ -196,15 +204,27 @@ export class InterviewSession {
     // connection health, and racing it would produce false timeouts.
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          channelCount: 1,
+        },
       });
     } catch (err) {
-      this.emitError("mic_permission_denied", "Microphone access was denied or unavailable.", err);
+      this.emitError(
+        "mic_permission_denied",
+        "Microphone access was denied or unavailable.",
+        err,
+      );
       throw err;
     }
 
     try {
-      await withTimeout(this.connectTransports(), CONNECT_TIMEOUT_MS, "Connection setup timed out.");
+      await withTimeout(
+        this.connectTransports(),
+        CONNECT_TIMEOUT_MS,
+        "Connection setup timed out.",
+      );
     } catch (err) {
       this.close();
       throw err;
@@ -234,7 +254,9 @@ export class InterviewSession {
 
     this.setFloor("AI_THINKING");
     if (this.coordWs?.readyState === WebSocket.OPEN) {
-      this.coordWs.send(JSON.stringify({ type: "utterance_end", text: trimmed }));
+      this.coordWs.send(
+        JSON.stringify({ type: "utterance_end", text: trimmed }),
+      );
     }
   }
 
@@ -268,7 +290,11 @@ export class InterviewSession {
     try {
       this.coordWs = await openWebSocket(coordUrl);
     } catch (err) {
-      this.emitError("coordination_connect_failed", "Could not connect to the interview session.", err);
+      this.emitError(
+        "coordination_connect_failed",
+        "Could not connect to the interview session.",
+        err,
+      );
       throw err;
     }
     this.coordWs.addEventListener("message", (ev) => {
@@ -310,7 +336,9 @@ export class InterviewSession {
 
     this.audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
     await this.audioCtx.audioWorklet.addModule("/worklets/pcm-processor.js");
-    const source = this.audioCtx.createMediaStreamSource(this.stream as MediaStream);
+    const source = this.audioCtx.createMediaStreamSource(
+      this.stream as MediaStream,
+    );
     this.workletNode = new AudioWorkletNode(this.audioCtx, "pcm-processor");
     this.workletNode.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
       if (this.deepgramWs?.readyState === WebSocket.OPEN) {
@@ -328,11 +356,14 @@ export class InterviewSession {
     let token: string;
     try {
       const res = await fetch("/api/live/deepgram-token", { method: "POST" });
-      if (!res.ok) throw new DeepgramTokenError(`token endpoint returned ${res.status}`);
+      if (!res.ok)
+        throw new DeepgramTokenError(`token endpoint returned ${res.status}`);
       const json = (await res.json()) as { access_token: string };
       token = json.access_token;
     } catch (err) {
-      throw err instanceof DeepgramTokenError ? err : new DeepgramTokenError(String(err));
+      throw err instanceof DeepgramTokenError
+        ? err
+        : new DeepgramTokenError(String(err));
     }
 
     // Sec-WebSocket-Protocol auth, NOT a query param: empirically verified
@@ -378,7 +409,10 @@ export class InterviewSession {
   private async reconnectDeepgram(): Promise<void> {
     if (this.closed) return;
     this.deepgramReconnectAttempt += 1;
-    if (this.deepgramReconnectAttempt > InterviewSession.MAX_DEEPGRAM_RECONNECT_ATTEMPTS) {
+    if (
+      this.deepgramReconnectAttempt >
+      InterviewSession.MAX_DEEPGRAM_RECONNECT_ATTEMPTS
+    ) {
       this.emitError(
         "deepgram_connect_failed",
         "Speech-to-text connection closed unexpectedly.",
@@ -429,7 +463,12 @@ export class InterviewSession {
     // real voice activity (VAD), a non-trivial fragment, and not an echo of
     // what the AI itself is saying.
     if (this.floor === "AI_SPEAKING" || this.floor === "AI_THINKING") {
-      const msSinceAiSpoke = this.floor === "AI_SPEAKING" ? 0 : (this.aiSpeechEndedAt !== null ? Date.now() - this.aiSpeechEndedAt : Infinity);
+      const msSinceAiSpoke =
+        this.floor === "AI_SPEAKING"
+          ? 0
+          : this.aiSpeechEndedAt !== null
+            ? Date.now() - this.aiSpeechEndedAt
+            : Infinity;
       const gates = {
         voiceDetected: this.speechStartedSeen,
         substantial: text.length >= 3,
@@ -445,7 +484,9 @@ export class InterviewSession {
 
     // Step 3: final-fragment accumulation.
     if (isFinal) {
-      this.finalizedText = this.finalizedText ? `${this.finalizedText} ${text}` : text;
+      this.finalizedText = this.finalizedText
+        ? `${this.finalizedText} ${text}`
+        : text;
       this.onTranscript?.(this.finalizedText, true);
       this.sendPartial(this.finalizedText, true);
       return;
@@ -465,7 +506,10 @@ export class InterviewSession {
     const now = Date.now();
     if (!isFinal) {
       const grown = text.length - this.lastSentPartial.length;
-      if (!(grown >= PARTIAL_MIN_GROWTH_CHARS && now - this.lastPartialSentAt >= PARTIAL_THROTTLE_MS)) {
+      if (!(
+        grown >= PARTIAL_MIN_GROWTH_CHARS &&
+        now - this.lastPartialSentAt >= PARTIAL_THROTTLE_MS
+      )) {
         return;
       }
     }
@@ -496,7 +540,10 @@ export class InterviewSession {
     this.clearUtteranceSafetyTimer();
     // The only two triggers that ever commit an utterance: Deepgram's own
     // UtteranceEnd event, and this watchdog if that event never arrives.
-    this.utteranceSafetyTimer = setTimeout(() => this.commitUtterance(), UTTERANCE_SAFETY_TIMEOUT_MS);
+    this.utteranceSafetyTimer = setTimeout(
+      () => this.commitUtterance(),
+      UTTERANCE_SAFETY_TIMEOUT_MS,
+    );
   }
 
   private clearUtteranceSafetyTimer(): void {
@@ -553,16 +600,30 @@ export class InterviewSession {
 
   // --- Coordination WS + TTS playback --------------------------------------
 
-  private async handleCoordinationMessage(ev: MessageEvent<string>): Promise<void> {
+  private async handleCoordinationMessage(
+    ev: MessageEvent<string>,
+  ): Promise<void> {
     let msg: CoordinationMessage;
     try {
       msg = JSON.parse(ev.data);
     } catch {
+      console.error(
+        "[InterviewSession] Failed to parse coordination message:",
+        ev.data,
+      );
       return;
     }
+    console.log(
+      "[InterviewSession] Received coordination message:",
+      msg.type,
+      msg,
+    );
     if (msg.type === "error") {
       this.terminalMessageHandled = true;
-      this.emitError("unexpected", String(msg.message ?? "The interview session reported an error."));
+      this.emitError(
+        "unexpected",
+        String(msg.message ?? "The interview session reported an error."),
+      );
       return;
     }
     if (msg.type === "session_conflict") {
@@ -576,14 +637,35 @@ export class InterviewSession {
       );
       return;
     }
-    if (msg.type !== "speak") return;
+    if (msg.type !== "speak") {
+      console.log(
+        "[InterviewSession] Ignoring non-speak message type:",
+        msg.type,
+      );
+      return;
+    }
 
     const text = String((msg as { text?: string }).text ?? "").trim();
-    if (!text) return;
+    console.log(
+      "[InterviewSession] Processing speak message, text length:",
+      text.length,
+    );
+    if (!text) {
+      console.warn("[InterviewSession] Speak message has empty text");
+      return;
+    }
+    console.log(
+      "[InterviewSession] Calling speak() with text:",
+      text.substring(0, 100),
+    );
     await this.speak(text);
   }
 
   private async speak(text: string): Promise<void> {
+    console.log(
+      "[InterviewSession.speak] Starting TTS for text:",
+      text.substring(0, 100),
+    );
     this.lastAiText = text;
     this.onQuestionText?.(text);
     this.setFloor("AI_THINKING");
@@ -593,16 +675,28 @@ export class InterviewSession {
 
     let audioBlob: Blob;
     try {
+      console.log(
+        "[InterviewSession.speak] Fetching TTS audio from /api/live/tts",
+      );
       const res = await fetch("/api/live/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
         signal: controller.signal,
       });
+      console.log("[InterviewSession.speak] TTS response status:", res.status);
       if (!res.ok) throw new Error(`tts endpoint returned ${res.status}`);
       audioBlob = await res.blob();
+      console.log(
+        "[InterviewSession.speak] TTS blob received, size:",
+        audioBlob.size,
+      );
     } catch (err) {
-      if (controller.signal.aborted) return; // barged-in mid-fetch — not a real error
+      console.error("[InterviewSession.speak] TTS error:", err);
+      if (controller.signal.aborted) {
+        console.log("[InterviewSession.speak] TTS fetch aborted");
+        return; // barged-in mid-fetch — not a real error
+      }
       this.emitError("tts_failed", "Could not generate speech audio.", err);
       if (this.floor === "AI_THINKING") this.setFloor("IDLE");
       return;
@@ -671,7 +765,8 @@ export class InterviewSession {
     if (this.deepgramWs) {
       this.deepgramWs.onmessage = null;
       this.deepgramWs.onclose = null;
-      if (this.deepgramWs.readyState === WebSocket.OPEN) this.deepgramWs.close();
+      if (this.deepgramWs.readyState === WebSocket.OPEN)
+        this.deepgramWs.close();
       this.deepgramWs = null;
     }
     if (this.coordWs) {
@@ -683,7 +778,11 @@ export class InterviewSession {
     this.floor = "IDLE";
   }
 
-  private emitError(kind: InterviewSessionErrorKind, message: string, cause?: unknown): void {
+  private emitError(
+    kind: InterviewSessionErrorKind,
+    message: string,
+    cause?: unknown,
+  ): void {
     this.onError?.({ kind, message, cause });
   }
 }

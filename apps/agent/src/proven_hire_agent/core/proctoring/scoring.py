@@ -30,7 +30,7 @@ from .weights import ProctoringWeights, load_proctoring_weights
 def _parse_created_at(value: str) -> datetime:
     # Postgres/Supabase may return a trailing "Z"; fromisoformat wants
     # "+00:00" on Python versions before 3.11's relaxed parser.
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))  # noqa: FURB162
 
 
 def compute_strike_score(

@@ -50,6 +50,8 @@ export function useIntegrityMonitor(
   const [settings, setSettings] = useState<IntegritySettings | null>(null);
   const [banner, setBanner] = useState<IntegrityBanner | null>(null);
   const [banned, setBanned] = useState(false);
+  const [isBlocked, setIsBlocked] = useState(false);
+  const [faceDetected, setFaceDetected] = useState(false);
   const strikesRef = useRef<Partial<Record<GuardRuleClass, number>>>({});
   const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -87,6 +89,23 @@ export function useIntegrityMonitor(
       const level = settings?.[rule];
       if (!level || level === "off") return; // guard fired after settings changed underneath it
 
+      // Track face detection state and clear blocks when resolved
+      if (eventType === "face_missing") {
+        setFaceDetected(false);
+      } else if (eventType === "multiple_faces") {
+        setFaceDetected(false);
+      } else if (eventType === "face_detected") {
+        // Explicit positive face detection - enable immediately and clear block
+        setFaceDetected(true);
+        setIsBlocked(false);
+        setBanner(null);
+        if (bannerTimerRef.current) {
+          clearTimeout(bannerTimerRef.current);
+          bannerTimerRef.current = null;
+        }
+        return; // Don't process further - face_detected is a success, not a violation
+      }
+
       if (
         level === "strict" &&
         (STRIKE_ELIGIBLE_RULES as readonly string[]).includes(rule)
@@ -100,8 +119,24 @@ export function useIntegrityMonitor(
       }
 
       setBanner({ rule, message, level });
+      if (level === "strict") {
+        setIsBlocked(true);
+      }
       if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
-      bannerTimerRef.current = setTimeout(() => setBanner(null), BANNER_MS);
+      bannerTimerRef.current = setTimeout(() => {
+        setBanner(null);
+        // For camera violations, DON'T auto-dismiss isBlocked.
+        // It will only be cleared when the violation is actually resolved
+        // (face detected or camera back on). This keeps the interview paused
+        // until the issue is fixed.
+        if (!["camera_required", "camera_ai_detection"].includes(rule)) {
+          setIsBlocked(false);
+        }
+        // Only mark face as detected if no violations are currently active
+        if (eventType !== "face_missing" && eventType !== "multiple_faces") {
+          setFaceDetected(true);
+        }
+      }, BANNER_MS);
 
       // Fire-and-forget: persist the event + get back the authoritative
       // weighted-decay score. A failed/slow POST never blocks the banner
@@ -162,6 +197,8 @@ export function useIntegrityMonitor(
     settings,
     banner,
     banned,
+    isBlocked,
+    faceDetected,
     needsFullscreen,
     requestFullscreen,
     cameraStatus,

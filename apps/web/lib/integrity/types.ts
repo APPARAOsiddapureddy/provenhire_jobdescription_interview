@@ -1,4 +1,7 @@
-import type { IntegrityRuleState, ProctoringSeverity } from "@proven-hire/shared";
+import type {
+  IntegrityRuleState,
+  ProctoringSeverity,
+} from "@proven-hire/shared";
 
 /**
  * The rule classes a live guard hook can report against. `screen_recording_enabled`

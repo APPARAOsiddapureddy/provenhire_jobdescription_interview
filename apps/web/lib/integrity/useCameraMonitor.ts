@@ -116,9 +116,11 @@ export function useCameraMonitor(
     canvas.height = CANVAS_H;
     const ctx2d = canvas.getContext("2d", { willReadFrequently: true });
 
-    function report(key: string, message: string) {
+    function report(key: string, message: string, skipCooldown = false) {
       const now = Date.now();
-      if (now - (lastReport[key] ?? 0) < REPORT_COOLDOWN_MS) return;
+      // Skip cooldown for face_detected during recovery - user needs immediate feedback
+      if (!skipCooldown && now - (lastReport[key] ?? 0) < REPORT_COOLDOWN_MS)
+        return;
       lastReport[key] = now;
       onViolation("camera_ai_detection", key, message);
     }
@@ -147,6 +149,9 @@ export function useCameraMonitor(
         return;
       }
 
+      let consecutiveGoodFrames = 0;
+      let lastViolationType: string | null = null;
+
       function tick() {
         const video = videoRef.current;
         if (!video || !ctx2d || video.readyState < 2) return;
@@ -159,8 +164,30 @@ export function useCameraMonitor(
           // keys exactly (face_missing=0.25, multiple_faces=1) so these
           // reports carry real weight; phone/low_light are weight-0/logged.
           report("face_missing", "No face detected in camera view.");
+          consecutiveGoodFrames = 0;
+          lastViolationType = "face_missing";
         } else if (faceCount > 1) {
           report("multiple_faces", "Multiple faces detected in camera view.");
+          consecutiveGoodFrames = 0;
+          lastViolationType = "multiple_faces";
+        } else {
+          // Exactly 1 face detected - track consecutive good frames
+          // If we just recovered from a violation, reset counter to re-report face_detected
+          const isRecovery = lastViolationType !== null;
+          if (isRecovery) {
+            consecutiveGoodFrames = 0;
+            lastViolationType = null;
+          }
+          consecutiveGoodFrames++;
+          // After 3 consecutive good frames (3 * 1.5s = 4.5s), report face detected
+          if (consecutiveGoodFrames === 3) {
+            // Skip cooldown during recovery so modal closes immediately
+            report(
+              "face_detected",
+              "Face successfully detected in camera view.",
+              isRecovery,
+            );
+          }
         }
 
         void cocoModel.detect(canvas).then((preds) => {

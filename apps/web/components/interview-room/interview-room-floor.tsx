@@ -22,11 +22,7 @@ import { AIOrb, type OrbState } from "./ai-orb";
 import { PHButton, PHSectionLabel } from "@/components/design-system";
 
 export type RoomPhase =
-  | "ready"
-  | "asking"
-  | "listening"
-  | "reviewing"
-  | "closing";
+  "ready" | "asking" | "listening" | "reviewing" | "closing";
 
 const PHASE_CONFIG: Record<
   RoomPhase,
@@ -91,7 +87,6 @@ export interface InterviewRoomFloorProps {
   /* Camera */
   cameraOn: boolean;
   cameraStream: MediaStream | null;
-  onToggleCamera: () => void;
 
   /* Candidate corner / history */
   historyOpen: boolean;
@@ -202,7 +197,9 @@ function Topbar({
       <div className="flex min-w-0 items-center gap-3">
         <span
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/15"
-          style={{ background: `color-mix(in oklch, ${cfg.aura} 18%, transparent)` }}
+          style={{
+            background: `color-mix(in oklch, ${cfg.aura} 18%, transparent)`,
+          }}
         >
           <span
             className="h-2 w-2 rounded-full"
@@ -258,9 +255,7 @@ function LeftPanel({
   const energyPct = 8 + micEnergy * 72;
   return (
     <div className="flex h-full flex-col gap-4 rounded-room border border-white/10 bg-white/[0.02] p-5">
-      <PHSectionLabel className="!text-white/45">
-        AI interviewer
-      </PHSectionLabel>
+      <PHSectionLabel className="!text-white/45">AI interviewer</PHSectionLabel>
       <p className="text-[15px] font-medium text-white">{cfg.label}</p>
 
       <div className="flex min-h-[300px] flex-1 items-center justify-center">
@@ -380,9 +375,7 @@ function ActivityPill({ phase }: { phase: RoomPhase }) {
   };
   return (
     <div className="flex justify-center">
-      <span
-        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3.5 py-1.5 text-[12px] text-white/80"
-      >
+      <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3.5 py-1.5 text-[12px] text-white/80">
         <span
           className="h-1.5 w-1.5 rounded-full"
           style={{ background: cfg.aura, boxShadow: `0 0 6px ${cfg.aura}` }}
@@ -401,10 +394,25 @@ function questionDensity(text: string): {
   fontSize: string;
 } {
   const len = text.length;
-  if (len <= 60) return { minHeight: "clamp(178px, 20vh, 210px)", fontSize: "clamp(34px, 3.25vw, 54px)" };
-  if (len <= 120) return { minHeight: "clamp(210px, 24vh, 250px)", fontSize: "clamp(30px, 2.8vw, 46px)" };
-  if (len <= 200) return { minHeight: "clamp(250px, 28vh, 292px)", fontSize: "clamp(26px, 2.3vw, 38px)" };
-  return { minHeight: "clamp(292px, 32vh, 332px)", fontSize: "clamp(23px, 2vw, 32px)" };
+  if (len <= 60)
+    return {
+      minHeight: "clamp(178px, 20vh, 210px)",
+      fontSize: "clamp(34px, 3.25vw, 54px)",
+    };
+  if (len <= 120)
+    return {
+      minHeight: "clamp(210px, 24vh, 250px)",
+      fontSize: "clamp(30px, 2.8vw, 46px)",
+    };
+  if (len <= 200)
+    return {
+      minHeight: "clamp(250px, 28vh, 292px)",
+      fontSize: "clamp(26px, 2.3vw, 38px)",
+    };
+  return {
+    minHeight: "clamp(292px, 32vh, 332px)",
+    fontSize: "clamp(23px, 2vw, 32px)",
+  };
 }
 
 function QuestionCard({ questionText }: { questionText: string }) {
@@ -607,7 +615,6 @@ function RightPanel({
   onToggleHistory,
   cameraOn,
   cameraStream,
-  onToggleCamera,
   candidateInitials,
   turnHistory,
   fullTranscriptMode,
@@ -618,7 +625,6 @@ function RightPanel({
   | "onToggleHistory"
   | "cameraOn"
   | "cameraStream"
-  | "onToggleCamera"
   | "candidateInitials"
   | "turnHistory"
   | "fullTranscriptMode"
@@ -663,18 +669,9 @@ function RightPanel({
           candidateInitials={candidateInitials}
         />
       </div>
-      <button
-        type="button"
-        onClick={onToggleCamera}
-        className="self-start font-mono text-[10px] uppercase tracking-[0.1em] text-white/50 hover:text-white"
-      >
-        {cameraOn ? "Turn camera off" : "Turn camera on"}
-      </button>
 
       <div className="mt-1 flex items-center justify-between">
-        <p className="text-[12px] font-medium text-white/70">
-          Question log
-        </p>
+        <p className="text-[12px] font-medium text-white/70">Question log</p>
         <button
           type="button"
           onClick={onToggleFullTranscript}
@@ -735,7 +732,10 @@ export function ModalScaffold({
       aria-modal="true"
       aria-labelledby={titleId}
       className="fixed inset-0 z-50 flex items-center justify-center p-6"
-      style={{ backdropFilter: "blur(24px)", background: "oklch(0.02 0 0 / 0.55)" }}
+      style={{
+        backdropFilter: "blur(24px)",
+        background: "oklch(0.02 0 0 / 0.55)",
+      }}
     >
       <div className="ph-card flex max-w-md flex-col items-center gap-4 rounded-room px-10 py-10 text-center">
         {children}
@@ -769,7 +769,10 @@ function ConfirmEndModal({
 }) {
   return (
     <ModalScaffold titleId="ph-confirm-end-title">
-      <p id="ph-confirm-end-title" className="text-[19px] font-semibold text-white">
+      <p
+        id="ph-confirm-end-title"
+        className="text-[19px] font-semibold text-white"
+      >
         Are you sure?
       </p>
       <p className="text-[13px] leading-relaxed text-white/60">
@@ -876,7 +879,6 @@ export function InterviewRoomFloor(props: InterviewRoomFloorProps) {
             onToggleHistory={props.onToggleHistory}
             cameraOn={props.cameraOn}
             cameraStream={props.cameraStream}
-            onToggleCamera={props.onToggleCamera}
             candidateInitials={props.candidateInitials}
             turnHistory={props.turnHistory}
             fullTranscriptMode={props.fullTranscriptMode}

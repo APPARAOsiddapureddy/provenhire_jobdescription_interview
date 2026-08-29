@@ -573,7 +573,13 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                 )
                 await websocket.close(code=1011)
                 return
+            log.info(
+                "live: sending opening question to client for %s (text: %s...)",
+                session_id,
+                (opening.reply_text[:100] if opening.reply_text else "EMPTY"),
+            )
             await websocket.send_json(protocol.speak(opening.reply_text))
+            log.info("live: opening question sent to client for %s", session_id)
             # Durably save turn-0 state immediately: without this, a
             # candidate who disconnects right after the greeting — before
             # ever answering, so the loop below never runs — reconnects to

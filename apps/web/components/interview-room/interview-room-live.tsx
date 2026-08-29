@@ -98,7 +98,8 @@ export function InterviewRoomLive({
   const connectionState = useConnectionState();
   const connected = connectionState === ConnectionState.Connected;
 
-  const { localParticipant, isMicrophoneEnabled, microphoneTrack } = useLocalParticipant();
+  const { localParticipant, isMicrophoneEnabled, microphoneTrack } =
+    useLocalParticipant();
   const { state: agentState } = useVoiceAssistant();
   const transcriptions = useTranscriptions();
   const { mergedProps: startAudioProps, canPlayAudio } = useStartAudio({
@@ -240,17 +241,17 @@ export function InterviewRoomLive({
 
       {!canPlayAudio && (
         <ModalScaffold titleId="audio-unlock-title">
-          <p id="audio-unlock-title" className="text-[19px] font-semibold text-white">
+          <p
+            id="audio-unlock-title"
+            className="text-[19px] font-semibold text-white"
+          >
             Enable interview audio
           </p>
           <p className="text-[13px] leading-relaxed text-white/60">
             Your browser blocked the interviewer&rsquo;s voice from playing
             automatically. Click below so you can hear them.
           </p>
-          <PHButton
-            variant="primary"
-            onClick={() => startAudioProps.onClick()}
-          >
+          <PHButton variant="primary" onClick={() => startAudioProps.onClick()}>
             Enable audio &amp; continue
           </PHButton>
         </ModalScaffold>
@@ -275,7 +276,6 @@ export function InterviewRoomLive({
         micReady={connected && isMicrophoneEnabled}
         cameraOn={cameraOn}
         cameraStream={cameraStream}
-        onToggleCamera={() => void toggleCamera()}
         historyOpen={historyOpen}
         onToggleHistory={() => setHistoryOpen((v) => !v)}
         fullTranscriptMode={fullTranscriptMode}

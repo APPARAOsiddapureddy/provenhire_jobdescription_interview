@@ -3,7 +3,13 @@
 import asyncio
 from types import SimpleNamespace
 
-from proven_hire_agent.core.adapters.llm import FallbackLLM, GeminiLLM, OllamaLLM, OpenAILLM, get_llm
+from proven_hire_agent.core.adapters.llm import (
+    FallbackLLM,
+    GeminiLLM,
+    OllamaLLM,
+    OpenAILLM,
+    get_llm,
+)
 from proven_hire_agent.core.adapters.mock import (
     MockEmbeddings,
     MockLLM,
