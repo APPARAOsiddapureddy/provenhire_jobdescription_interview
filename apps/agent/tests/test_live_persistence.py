@@ -105,6 +105,11 @@ def test_persist_and_score_background_mode_returns_before_scoring_completes(monk
             live_persistence.persist_and_score(session_id, ud, deps, background_score=True),
             timeout=2.0,
         )
+        # Give the background task its first scheduled step — the in-memory
+        # repo used here has no genuine I/O suspension point, so the task
+        # _fire_and_forget created is merely QUEUED (call_soon) at the moment
+        # persist_and_score returns, not yet started.
+        await asyncio.sleep(0)
         # It returned WHILE scoring was still deliberately blocked, not
         # because scoring happened to finish fast.
         assert scoring_started.is_set()

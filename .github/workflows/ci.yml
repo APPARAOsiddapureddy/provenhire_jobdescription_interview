@@ -85,8 +85,7 @@ jobs:
       - name: Build agent API image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: apps/agent/Dockerfile
+          context: ./apps/agent
           target: api
           push: false
           cache-from: type=gha,scope=agent-api
