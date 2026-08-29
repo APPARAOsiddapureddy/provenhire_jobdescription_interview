@@ -61,7 +61,7 @@ describe("LocalizedText en-required invariant", () => {
 });
 
 describe("SCHEMAS registry", () => {
-  it("has exactly 32 entries", () => {
-    expect(Object.keys(SCHEMAS)).toHaveLength(32);
+  it("has exactly 36 entries", () => {
+    expect(Object.keys(SCHEMAS)).toHaveLength(36);
   });
 });
