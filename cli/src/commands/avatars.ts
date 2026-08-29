@@ -88,9 +88,7 @@ async function pull(): Promise<void> {
 
 async function verify(paths: string[]): Promise<void> {
   if (paths.length === 0) {
-    console.error(
-      "Usage: proven-hire avatars verify <file.mp4|file.jpg> […]",
-    );
+    console.error("Usage: proven-hire avatars verify <file.mp4|file.jpg> […]");
     process.exitCode = 1;
     return;
   }

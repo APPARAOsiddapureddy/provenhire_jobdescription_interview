@@ -33,9 +33,21 @@ const FOLLOW_UP_DEPTH_OPTIONS: {
   label: string;
   detail: string;
 }[] = [
-  { value: "light", label: "Light", detail: "Mostly scripted questions, minimal probing." },
-  { value: "moderate", label: "Moderate", detail: "A balanced mix — the default." },
-  { value: "deep", label: "Deep", detail: "Digs in with more follow-ups per question." },
+  {
+    value: "light",
+    label: "Light",
+    detail: "Mostly scripted questions, minimal probing.",
+  },
+  {
+    value: "moderate",
+    label: "Moderate",
+    detail: "A balanced mix — the default.",
+  },
+  {
+    value: "deep",
+    label: "Deep",
+    detail: "Digs in with more follow-ups per question.",
+  },
 ];
 
 const STAGES = [
@@ -208,7 +220,10 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
   }
 
   async function requestMediaPermissions() {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
       return;
     }
     try {
@@ -311,8 +326,8 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
         </h1>
         <p className="mt-2 max-w-xl text-[14px] leading-relaxed text-[var(--ph-text-2)]">
           ProvenHire reads both, runs a real gap analysis, and builds a voice
-          interview from what the role actually asks for — three stages,
-          scored against what you actually bring.
+          interview from what the role actually asks for — three stages, scored
+          against what you actually bring.
         </p>
       </div>
 
@@ -415,7 +430,10 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
       </PHSurface>
 
       <PHSurface className="flex flex-col gap-2 rounded-2xl p-5">
-        <label htmlFor="jdText" className="text-[13px] font-medium text-[var(--ph-text-1)]">
+        <label
+          htmlFor="jdText"
+          className="text-[13px] font-medium text-[var(--ph-text-1)]"
+        >
           Job description
         </label>
         <textarea
@@ -437,7 +455,10 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <PHSurface className="flex flex-col gap-2 rounded-2xl p-5">
-          <label htmlFor="role" className="text-[13px] font-medium text-[var(--ph-text-1)]">
+          <label
+            htmlFor="role"
+            className="text-[13px] font-medium text-[var(--ph-text-1)]"
+          >
             Target role / title
           </label>
           <input
@@ -492,7 +513,10 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
         </PHSurface>
 
         <PHSurface className="flex flex-col gap-2 rounded-2xl p-5">
-          <label htmlFor="name" className="text-[13px] font-medium text-[var(--ph-text-1)]">
+          <label
+            htmlFor="name"
+            className="text-[13px] font-medium text-[var(--ph-text-1)]"
+          >
             Candidate name
           </label>
           <input
@@ -506,7 +530,10 @@ export function PHSetupForm({ r2Configured }: { r2Configured: boolean }) {
         </PHSurface>
 
         <PHSurface className="flex flex-col gap-2 rounded-2xl p-5">
-          <label htmlFor="email" className="text-[13px] font-medium text-[var(--ph-text-1)]">
+          <label
+            htmlFor="email"
+            className="text-[13px] font-medium text-[var(--ph-text-1)]"
+          >
             Email <span className="text-[var(--ph-text-3)]">(optional)</span>
           </label>
           <input

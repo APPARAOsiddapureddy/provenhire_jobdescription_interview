@@ -206,13 +206,7 @@ function StatusShell({ children }: { children: React.ReactNode }) {
  * (sample/offline preview), the shared sample interview context fills the
  * same shape.
  */
-function RoleFitSection({
-  job,
-  gap,
-}: {
-  job: JobSpec;
-  gap: GapAnalysis;
-}) {
+function RoleFitSection({ job, gap }: { job: JobSpec; gap: GapAnalysis }) {
   // Filter out empty/whitespace entries before building the lookup sets:
   // `"".includes(x)` and `x.includes("")` are BOTH always true in JS, so an
   // empty string surviving into `matched`/`missing` would make every single
@@ -411,7 +405,10 @@ export default async function ReportPage({
   const gap = loaded.context?.gap ?? SAMPLE_INTERVIEW_CONTEXT.gap;
   // ScoreCard's `overall_score` is on a 0-5 scale; scoreToVerdict expects a
   // 0-1 fraction.
-  const verdict = scoreToVerdict(scorecard.overall_score / 5, scorecard.coverage_pct);
+  const verdict = scoreToVerdict(
+    scorecard.overall_score / 5,
+    scorecard.coverage_pct,
+  );
 
   const TABS = [
     { id: "decision", label: "Decision" },
@@ -468,7 +465,6 @@ export default async function ReportPage({
           ))}
         </nav>
       </div>
-
 
       {/* Partial (degraded) card: the agent persisted it without the full
           narrative — show what's there, with an honest notice. */}

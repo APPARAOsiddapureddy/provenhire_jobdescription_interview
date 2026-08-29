@@ -152,9 +152,7 @@ export function useInterviewDemo(
     function tick(now: number) {
       const elapsed = (now - t0) / 1000;
       const wave =
-        0.5 +
-        0.35 * Math.sin(elapsed * 2.4) +
-        0.15 * Math.sin(elapsed * 7.1);
+        0.5 + 0.35 * Math.sin(elapsed * 2.4) + 0.15 * Math.sin(elapsed * 7.1);
       setMicEnergy(Math.max(0, Math.min(1, wave)));
       micRafRef.current = requestAnimationFrame(tick);
     }

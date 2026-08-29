@@ -44,7 +44,9 @@ export const ProctoringEventResponseSchema = z.object({
   score: z.number(),
   ban_triggered: z.boolean(),
 });
-export type ProctoringEventResponse = z.infer<typeof ProctoringEventResponseSchema>;
+export type ProctoringEventResponse = z.infer<
+  typeof ProctoringEventResponseSchema
+>;
 
 /**
  * The single physical source of truth for weight/decay/threshold values,
@@ -65,7 +67,8 @@ const weightsFile = weightsData as ProctoringWeightsFile;
 export const PROCTORING_WEIGHTS: Record<string, number> = weightsFile.weights;
 export const PROCTORING_DECAY_PER_STEP = weightsFile.decay_per_step;
 export const PROCTORING_DECAY_STEP_SEC = weightsFile.decay_step_sec;
-export const PROCTORING_STRIKE_THRESHOLD_DEFAULT = weightsFile.strike_threshold_default;
+export const PROCTORING_STRIKE_THRESHOLD_DEFAULT =
+  weightsFile.strike_threshold_default;
 
 /** Any type not in the table is logged-only (weight 0) — never throws. */
 export function weightFor(type: string): number {

@@ -119,7 +119,8 @@ export function useCameraMonitor(
     function report(key: string, message: string, skipCooldown = false) {
       const now = Date.now();
       // Skip cooldown for face_detected during recovery - user needs immediate feedback
-      if (!skipCooldown && now - (lastReport[key] ?? 0) < REPORT_COOLDOWN_MS) return;
+      if (!skipCooldown && now - (lastReport[key] ?? 0) < REPORT_COOLDOWN_MS)
+        return;
       lastReport[key] = now;
       onViolation("camera_ai_detection", key, message);
     }
@@ -181,7 +182,11 @@ export function useCameraMonitor(
           // After 3 consecutive good frames (3 * 1.5s = 4.5s), report face detected
           if (consecutiveGoodFrames === 3) {
             // Skip cooldown during recovery so modal closes immediately
-            report("face_detected", "Face successfully detected in camera view.", isRecovery);
+            report(
+              "face_detected",
+              "Face successfully detected in camera view.",
+              isRecovery,
+            );
           }
         }
 

@@ -19,7 +19,11 @@ export function ProctoringCheck({
   const [cameraChecksPassed, setCameraChecksPassed] = useState(false);
 
   // Use integrity monitor to get settings, camera status, and face detection
-  const { settings, cameraStatus, faceDetected } = useIntegrityMonitor(sessionId, () => {}, null);
+  const { settings, cameraStatus, faceDetected } = useIntegrityMonitor(
+    sessionId,
+    () => {},
+    null,
+  );
 
   const cameraReady = cameraStatus === "ok";
   const cameraRequested = cameraStatus === "requesting";
@@ -98,7 +102,9 @@ export function ProctoringCheck({
         {/* Camera Status */}
         <div className="space-y-3 mb-6">
           <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/5 p-4">
-            <div className={`h-2 w-2 rounded-full ${cameraReady ? "bg-green-500" : cameraDenied ? "bg-red-500" : "bg-yellow-500 animate-pulse"}`} />
+            <div
+              className={`h-2 w-2 rounded-full ${cameraReady ? "bg-green-500" : cameraDenied ? "bg-red-500" : "bg-yellow-500 animate-pulse"}`}
+            />
             <div className="flex-1">
               <div className="text-sm font-medium text-white">
                 {cameraReady
@@ -124,10 +130,16 @@ export function ProctoringCheck({
           </div>
 
           <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/5 p-4">
-            <div className={`h-2 w-2 rounded-full ${faceDetected ? "bg-green-500" : cameraReady ? "bg-yellow-500 animate-pulse" : "bg-gray-500"}`} />
+            <div
+              className={`h-2 w-2 rounded-full ${faceDetected ? "bg-green-500" : cameraReady ? "bg-yellow-500 animate-pulse" : "bg-gray-500"}`}
+            />
             <div className="flex-1">
               <div className="text-sm font-medium text-white">
-                {faceDetected ? "Face Detected ✓" : cameraReady ? "Detecting face..." : "Waiting for camera"}
+                {faceDetected
+                  ? "Face Detected ✓"
+                  : cameraReady
+                    ? "Detecting face..."
+                    : "Waiting for camera"}
               </div>
               <div className="text-xs text-white/50">
                 {faceDetected
@@ -137,7 +149,9 @@ export function ProctoringCheck({
                     : "Enable camera first"}
               </div>
             </div>
-            {faceDetected && <CheckCircle2 className="h-5 w-5 text-green-500" />}
+            {faceDetected && (
+              <CheckCircle2 className="h-5 w-5 text-green-500" />
+            )}
           </div>
         </div>
 
@@ -145,7 +159,9 @@ export function ProctoringCheck({
         {cameraRequested && (
           <div className="mb-6 rounded-lg bg-blue-500/10 border border-blue-500/30 p-4 text-center">
             <div className="animate-spin h-6 w-6 border-2 border-blue-500 border-t-transparent rounded-full mx-auto mb-2" />
-            <p className="text-sm text-blue-300">Connecting to your camera...</p>
+            <p className="text-sm text-blue-300">
+              Connecting to your camera...
+            </p>
           </div>
         )}
 
@@ -162,7 +178,9 @@ export function ProctoringCheck({
           {!streamRef.current && (
             <div className="flex flex-col items-center gap-2 text-center">
               <Camera className="h-8 w-8 text-white/40" />
-              <p className="text-xs text-white/50">Camera preview will appear here</p>
+              <p className="text-xs text-white/50">
+                Camera preview will appear here
+              </p>
             </div>
           )}
         </div>
@@ -171,7 +189,8 @@ export function ProctoringCheck({
         <div className="space-y-3">
           {cameraDenied && (
             <p className="text-xs text-red-400 text-center">
-              Camera access was denied. Please check your browser permissions and try again.
+              Camera access was denied. Please check your browser permissions
+              and try again.
             </p>
           )}
 

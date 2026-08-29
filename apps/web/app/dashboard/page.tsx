@@ -88,7 +88,9 @@ function riskColor(pct: number): string {
 export default function DashboardPage() {
   const totalSessions = SAMPLE_ROWS.length;
   const hireCount = SAMPLE_ROWS.filter(
-    (r) => scoreToVerdict(r.overallScore) === "HIRE" || scoreToVerdict(r.overallScore) === "STRONG_HIRE",
+    (r) =>
+      scoreToVerdict(r.overallScore) === "HIRE" ||
+      scoreToVerdict(r.overallScore) === "STRONG_HIRE",
   ).length;
   const maybeCount = SAMPLE_ROWS.filter(
     (r) => scoreToVerdict(r.overallScore) === "MAYBE",
@@ -120,7 +122,11 @@ export default function DashboardPage() {
         </div>
 
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <PHMetricCard label="Sessions" value={totalSessions} emphasis="default" />
+          <PHMetricCard
+            label="Sessions"
+            value={totalSessions}
+            emphasis="default"
+          />
           <PHMetricCard label="Hire" value={hireCount} emphasis="green" />
           <PHMetricCard label="Maybe" value={maybeCount} emphasis="amber" />
           <PHMetricCard
@@ -135,16 +141,20 @@ export default function DashboardPage() {
             <table className="w-full min-w-[720px] border-collapse text-left">
               <thead>
                 <tr className="border-b border-[var(--ph-border)]">
-                  {["Session", "Questions", "Weaknesses", "Coverage", "Verdict"].map(
-                    (h) => (
-                      <th
-                        key={h}
-                        className="ph-kicker px-5 py-3 font-mono text-[var(--ph-text-3)]"
-                      >
-                        {h}
-                      </th>
-                    ),
-                  )}
+                  {[
+                    "Session",
+                    "Questions",
+                    "Weaknesses",
+                    "Coverage",
+                    "Verdict",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="ph-kicker px-5 py-3 font-mono text-[var(--ph-text-3)]"
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -190,7 +200,9 @@ export default function DashboardPage() {
                       </div>
                     </td>
                     <td className="px-5 py-4">
-                      <PHVerdictBadge verdict={scoreToVerdict(row.overallScore)} />
+                      <PHVerdictBadge
+                        verdict={scoreToVerdict(row.overallScore)}
+                      />
                     </td>
                   </tr>
                 ))}

@@ -50,7 +50,8 @@ export default async function InterviewRoomPage({
   if (!session || session.session_id !== session_id) notFound();
 
   // Browser WebSocket needs a public-facing URL, not the docker-internal one
-  const agentWsUrl = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:8000";
+  const agentWsUrl =
+    process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:8000";
 
   return (
     <InterviewRoomClient

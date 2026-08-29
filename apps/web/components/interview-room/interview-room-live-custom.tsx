@@ -112,7 +112,9 @@ export function InterviewRoomLiveCustom({
   const [canPlayAudio, setCanPlayAudio] = React.useState(true);
   const [micFailureMsg, setMicFailureMsg] = React.useState<string | null>(null);
   const [attempt, setAttempt] = React.useState(0);
-  const [violationMessage, setViolationMessage] = React.useState<string | null>(null);
+  const [violationMessage, setViolationMessage] = React.useState<string | null>(
+    null,
+  );
 
   const phase = floorStateToPhase(floor);
   const floorOwner: "ai" | "candidate" | null =
@@ -211,7 +213,9 @@ export function InterviewRoomLiveCustom({
   // Purely cosmetic "get ready" countdown — same rationale as the LiveKit
   // room: the interviewer's own opening line is in flight server-side
   // (LLM/TTS latency, possible cold start). Never gates anything real.
-  const [countdownValue, setCountdownValue] = React.useState<number | null>(null);
+  const [countdownValue, setCountdownValue] = React.useState<number | null>(
+    null,
+  );
   const countdownStartedRef = React.useRef(false);
   React.useEffect(() => {
     if (!micReady || countdownStartedRef.current) return;
@@ -275,7 +279,12 @@ export function InterviewRoomLiveCustom({
   }, [integrityBanner]);
 
   if (!proctoringPassed) {
-    return <ProctoringCheck sessionId={sessionId} onPassed={() => setProctoringPassed(true)} />;
+    return (
+      <ProctoringCheck
+        sessionId={sessionId}
+        onPassed={() => setProctoringPassed(true)}
+      />
+    );
   }
 
   return (
@@ -287,7 +296,10 @@ export function InterviewRoomLiveCustom({
       )}
       {isBlocked && (
         <ProctoringViolationModal
-          message={violationMessage || "Camera issue detected. Please enable your camera to continue."}
+          message={
+            violationMessage ||
+            "Camera issue detected. Please enable your camera to continue."
+          }
           onTimeout={onAutoEnd}
           onRetry={() => {
             setViolationMessage(null);
@@ -318,7 +330,10 @@ export function InterviewRoomLiveCustom({
 
       {!canPlayAudio && (
         <ModalScaffold titleId="audio-unlock-title">
-          <p id="audio-unlock-title" className="text-[19px] font-semibold text-white">
+          <p
+            id="audio-unlock-title"
+            className="text-[19px] font-semibold text-white"
+          >
             Enable interview audio
           </p>
           <p className="text-[13px] leading-relaxed text-white/60">

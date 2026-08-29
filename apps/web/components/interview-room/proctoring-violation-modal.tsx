@@ -65,7 +65,10 @@ export function ProctoringViolationModal({
           <AlertTriangle className="h-6 w-6 text-red-500" />
         </div>
       </div>
-      <p id="ph-violation-title" className="text-[19px] font-semibold text-white text-center mb-2">
+      <p
+        id="ph-violation-title"
+        className="text-[19px] font-semibold text-white text-center mb-2"
+      >
         Camera Issue Detected
       </p>
       <p className="text-[13px] leading-relaxed text-white/60 text-center mb-6">
@@ -85,7 +88,9 @@ export function ProctoringViolationModal({
         {!streamRef.current && (
           <div className="flex flex-col items-center gap-2 text-center">
             <Camera className="h-8 w-8 text-white/40" />
-            <p className="text-xs text-white/50">Camera preview will appear here</p>
+            <p className="text-xs text-white/50">
+              Camera preview will appear here
+            </p>
           </div>
         )}
       </div>
@@ -119,7 +124,8 @@ export function ProctoringViolationModal({
           Turn Camera On
         </PHButton>
         <p className="text-[11px] text-white/50 text-center">
-          Please enable your camera or remove any blocking objects from the camera view.
+          Please enable your camera or remove any blocking objects from the
+          camera view.
         </p>
       </div>
     </ModalScaffold>

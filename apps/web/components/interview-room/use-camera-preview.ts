@@ -21,12 +21,15 @@ export function useCameraPreview() {
     hasTriedToEnableRef.current = true;
 
     async function enableCamera() {
-      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      if (
+        typeof navigator === "undefined" ||
+        !navigator.mediaDevices?.getUserMedia
+      ) {
         return;
       }
       try {
         const s = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 320 }, height: { ideal: 240 } }
+          video: { width: { ideal: 320 }, height: { ideal: 240 } },
         });
         streamRef.current = s;
         setStream(s);
@@ -55,12 +58,15 @@ export function useCameraPreview() {
       setCameraOn(false);
       return;
     }
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
       return;
     }
     try {
       const s = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 320 }, height: { ideal: 240 } }
+        video: { width: { ideal: 320 }, height: { ideal: 240 } },
       });
       streamRef.current = s;
       setStream(s);

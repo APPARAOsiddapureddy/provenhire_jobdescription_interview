@@ -43,10 +43,17 @@ export function IntegrityBanner({ banner }: { banner: IntegrityBannerData }) {
  * plan's Phase 6); showing an auto-end timer here today would risk ending
  * brand-new sessions before the candidate has had a chance to react.
  */
-export function FullscreenRequiredModal({ onContinue }: { onContinue: () => void }) {
+export function FullscreenRequiredModal({
+  onContinue,
+}: {
+  onContinue: () => void;
+}) {
   return (
     <ModalScaffold titleId="ph-fullscreen-required-title">
-      <p id="ph-fullscreen-required-title" className="text-[19px] font-semibold text-white">
+      <p
+        id="ph-fullscreen-required-title"
+        className="text-[19px] font-semibold text-white"
+      >
         Fullscreen required
       </p>
       <p className="text-[13px] leading-relaxed text-white/60">
@@ -78,8 +85,8 @@ export function ProctoringBanModal({ onTimeout }: { onTimeout: () => void }) {
         Assessment ending
       </p>
       <p className="text-[13px] leading-relaxed text-white/60">
-        Repeated integrity violations were detected during this session.
-        Ending in{" "}
+        Repeated integrity violations were detected during this session. Ending
+        in{" "}
         <span className="font-mono font-semibold text-[var(--ph-red)]">
           {secondsLeft}s
         </span>
