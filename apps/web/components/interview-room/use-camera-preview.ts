@@ -13,6 +13,32 @@ export function useCameraPreview() {
   const [cameraOn, setCameraOn] = React.useState(false);
   const [stream, setStream] = React.useState<MediaStream | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const hasTriedToEnableRef = React.useRef(false);
+
+  // Auto-enable camera preview when interview starts
+  React.useEffect(() => {
+    if (hasTriedToEnableRef.current) return;
+    hasTriedToEnableRef.current = true;
+
+    async function enableCamera() {
+      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        return;
+      }
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 320 }, height: { ideal: 240 } }
+        });
+        streamRef.current = s;
+        setStream(s);
+        setCameraOn(true);
+      } catch (err) {
+        console.error("Failed to enable camera preview:", err);
+        setCameraOn(false);
+      }
+    }
+
+    enableCamera();
+  }, []);
 
   React.useEffect(
     () => () => {
@@ -33,11 +59,14 @@ export function useCameraPreview() {
       return;
     }
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      const s = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 320 }, height: { ideal: 240 } }
+      });
       streamRef.current = s;
       setStream(s);
       setCameraOn(true);
-    } catch {
+    } catch (err) {
+      console.error("Failed to enable camera:", err);
       setCameraOn(false);
     }
   }, [cameraOn]);

@@ -33,6 +33,8 @@ import {
   FullscreenRequiredModal,
   ProctoringBanModal,
 } from "./integrity-overlay";
+import { ProctoringCheck } from "./proctoring-check";
+import { ProctoringViolationModal } from "./proctoring-violation-modal";
 import { useCameraPreview } from "./use-camera-preview";
 import { useMicEnergy } from "./use-mic-energy";
 import { useIntegrityMonitor } from "@/lib/integrity";
@@ -96,6 +98,7 @@ export function InterviewRoomLiveCustom({
   const router = useRouter();
   const sessionRef = React.useRef<InterviewSession | null>(null);
 
+  const [proctoringPassed, setProctoringPassed] = React.useState(false);
   const [floor, setFloor] = React.useState<FloorState>("IDLE");
   const [transcriptText, setTranscriptText] = React.useState("");
   // What the AI is ACTUALLY saying, from the coordination WS's own "speak"
@@ -109,6 +112,7 @@ export function InterviewRoomLiveCustom({
   const [canPlayAudio, setCanPlayAudio] = React.useState(true);
   const [micFailureMsg, setMicFailureMsg] = React.useState<string | null>(null);
   const [attempt, setAttempt] = React.useState(0);
+  const [violationMessage, setViolationMessage] = React.useState<string | null>(null);
 
   const phase = floorStateToPhase(floor);
   const floorOwner: "ai" | "candidate" | null =
@@ -128,6 +132,12 @@ export function InterviewRoomLiveCustom({
 
   React.useEffect(() => {
     let cancelled = false;
+
+    // Only connect session AFTER proctoring passes
+    if (!proctoringPassed) {
+      return;
+    }
+
     const session = new InterviewSession({
       sessionId,
       agentWsBaseUrl,
@@ -179,10 +189,15 @@ export function InterviewRoomLiveCustom({
       session.close();
       sessionRef.current = null;
     };
-  }, [sessionId, agentWsBaseUrl, attempt]);
+  }, [sessionId, agentWsBaseUrl, attempt, proctoringPassed]);
+
+  // Clear transcript when a new question starts
+  React.useEffect(() => {
+    setTranscriptText("");
+  }, [liveQuestionText]);
 
   const micEnergy = useMicEnergy(phase === "listening", micTrack);
-  const { cameraOn, cameraStream, toggleCamera } = useCameraPreview();
+  const { cameraOn, cameraStream } = useCameraPreview();
 
   const [transcriptOpen, setTranscriptOpen] = React.useState(true);
   const [historyOpen, setHistoryOpen] = React.useState(true);
@@ -248,9 +263,20 @@ export function InterviewRoomLiveCustom({
   const {
     banner: integrityBanner,
     banned,
+    isBlocked,
     needsFullscreen,
     requestFullscreen,
   } = useIntegrityMonitor(sessionId, onAutoEnd, micTrack);
+
+  React.useEffect(() => {
+    if (integrityBanner) {
+      setViolationMessage(integrityBanner.message);
+    }
+  }, [integrityBanner]);
+
+  if (!proctoringPassed) {
+    return <ProctoringCheck sessionId={sessionId} onPassed={() => setProctoringPassed(true)} />;
+  }
 
   return (
     <>
@@ -258,6 +284,18 @@ export function InterviewRoomLiveCustom({
       {banned && <ProctoringBanModal onTimeout={onAutoEnd} />}
       {!banned && needsFullscreen && (
         <FullscreenRequiredModal onContinue={requestFullscreen} />
+      )}
+      {isBlocked && (
+        <ProctoringViolationModal
+          message={violationMessage || "Camera issue detected. Please enable your camera to continue."}
+          onTimeout={onAutoEnd}
+          onRetry={() => {
+            setViolationMessage(null);
+            // Modal stays visible with countdown running until either:
+            // 1. Camera is fixed and face detected (isBlocked clears)
+            // 2. 20 seconds elapse (onTimeout ends interview)
+          }}
+        />
       )}
 
       {micFailureMsg && (
@@ -318,7 +356,6 @@ export function InterviewRoomLiveCustom({
         micReady={micReady}
         cameraOn={cameraOn}
         cameraStream={cameraStream}
-        onToggleCamera={() => void toggleCamera()}
         historyOpen={historyOpen}
         onToggleHistory={() => setHistoryOpen((v) => !v)}
         fullTranscriptMode={fullTranscriptMode}

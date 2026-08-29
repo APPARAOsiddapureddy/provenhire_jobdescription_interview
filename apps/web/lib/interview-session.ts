@@ -558,8 +558,10 @@ export class InterviewSession {
     try {
       msg = JSON.parse(ev.data);
     } catch {
+      console.error("[InterviewSession] Failed to parse coordination message:", ev.data);
       return;
     }
+    console.log("[InterviewSession] Received coordination message:", msg.type, msg);
     if (msg.type === "error") {
       this.terminalMessageHandled = true;
       this.emitError("unexpected", String(msg.message ?? "The interview session reported an error."));
@@ -576,14 +578,23 @@ export class InterviewSession {
       );
       return;
     }
-    if (msg.type !== "speak") return;
+    if (msg.type !== "speak") {
+      console.log("[InterviewSession] Ignoring non-speak message type:", msg.type);
+      return;
+    }
 
     const text = String((msg as { text?: string }).text ?? "").trim();
-    if (!text) return;
+    console.log("[InterviewSession] Processing speak message, text length:", text.length);
+    if (!text) {
+      console.warn("[InterviewSession] Speak message has empty text");
+      return;
+    }
+    console.log("[InterviewSession] Calling speak() with text:", text.substring(0, 100));
     await this.speak(text);
   }
 
   private async speak(text: string): Promise<void> {
+    console.log("[InterviewSession.speak] Starting TTS for text:", text.substring(0, 100));
     this.lastAiText = text;
     this.onQuestionText?.(text);
     this.setFloor("AI_THINKING");
@@ -593,16 +604,23 @@ export class InterviewSession {
 
     let audioBlob: Blob;
     try {
+      console.log("[InterviewSession.speak] Fetching TTS audio from /api/live/tts");
       const res = await fetch("/api/live/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
         signal: controller.signal,
       });
+      console.log("[InterviewSession.speak] TTS response status:", res.status);
       if (!res.ok) throw new Error(`tts endpoint returned ${res.status}`);
       audioBlob = await res.blob();
+      console.log("[InterviewSession.speak] TTS blob received, size:", audioBlob.size);
     } catch (err) {
-      if (controller.signal.aborted) return; // barged-in mid-fetch — not a real error
+      console.error("[InterviewSession.speak] TTS error:", err);
+      if (controller.signal.aborted) {
+        console.log("[InterviewSession.speak] TTS fetch aborted");
+        return; // barged-in mid-fetch — not a real error
+      }
       this.emitError("tts_failed", "Could not generate speech audio.", err);
       if (this.floor === "AI_THINKING") this.setFloor("IDLE");
       return;

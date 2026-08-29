@@ -275,7 +275,6 @@ export function InterviewRoomLive({
         micReady={connected && isMicrophoneEnabled}
         cameraOn={cameraOn}
         cameraStream={cameraStream}
-        onToggleCamera={() => void toggleCamera()}
         historyOpen={historyOpen}
         onToggleHistory={() => setHistoryOpen((v) => !v)}
         fullTranscriptMode={fullTranscriptMode}

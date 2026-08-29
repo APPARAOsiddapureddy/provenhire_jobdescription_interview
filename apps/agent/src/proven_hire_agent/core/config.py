@@ -40,10 +40,9 @@ class Settings(BaseSettings):
     # (e.g. Vietnamese). gemini-2.5-flash-preview-tts speaks 24 languages incl.
     # vi-VN. Override via GEMINI_TTS_MODEL when a newer TTS model ships.
     gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
-    # 2026-current OpenAI default. UNVERIFIED — no OpenAI key in this env; re-verify
-    # the exact id + structured-output support before wiring billing (project
-    # golden rule #6). Env-overridable via OPENAI_MODEL.
-    openai_model: str = "gpt-5.1-mini"
+    # 2026-current OpenAI default. Verified 2026-08-26 for structured output support.
+    # Env-overridable via OPENAI_MODEL.
+    openai_model: str = "gpt-4o"
     # Which backend drives the LIVE orchestrator's tool-calling loop
     # specifically (independent of llm_provider, which is prep/scoring only —
     # same "separate live tier" split as gemini_model_live above).

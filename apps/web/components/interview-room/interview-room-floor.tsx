@@ -91,7 +91,6 @@ export interface InterviewRoomFloorProps {
   /* Camera */
   cameraOn: boolean;
   cameraStream: MediaStream | null;
-  onToggleCamera: () => void;
 
   /* Candidate corner / history */
   historyOpen: boolean;
@@ -607,7 +606,6 @@ function RightPanel({
   onToggleHistory,
   cameraOn,
   cameraStream,
-  onToggleCamera,
   candidateInitials,
   turnHistory,
   fullTranscriptMode,
@@ -618,7 +616,6 @@ function RightPanel({
   | "onToggleHistory"
   | "cameraOn"
   | "cameraStream"
-  | "onToggleCamera"
   | "candidateInitials"
   | "turnHistory"
   | "fullTranscriptMode"
@@ -663,13 +660,6 @@ function RightPanel({
           candidateInitials={candidateInitials}
         />
       </div>
-      <button
-        type="button"
-        onClick={onToggleCamera}
-        className="self-start font-mono text-[10px] uppercase tracking-[0.1em] text-white/50 hover:text-white"
-      >
-        {cameraOn ? "Turn camera off" : "Turn camera on"}
-      </button>
 
       <div className="mt-1 flex items-center justify-between">
         <p className="text-[12px] font-medium text-white/70">
@@ -876,7 +866,6 @@ export function InterviewRoomFloor(props: InterviewRoomFloorProps) {
             onToggleHistory={props.onToggleHistory}
             cameraOn={props.cameraOn}
             cameraStream={props.cameraStream}
-            onToggleCamera={props.onToggleCamera}
             candidateInitials={props.candidateInitials}
             turnHistory={props.turnHistory}
             fullTranscriptMode={props.fullTranscriptMode}
