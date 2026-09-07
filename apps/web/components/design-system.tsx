@@ -156,7 +156,8 @@ const phButtonVariants = cva(
 );
 
 export interface PHButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof phButtonVariants> {
   href?: string;
 }
@@ -282,9 +283,7 @@ export function PHMetricCard({
         {value}
       </span>
       {subtext && (
-        <span className="text-[13px] text-[var(--ph-text-2)]">
-          {subtext}
-        </span>
+        <span className="text-[13px] text-[var(--ph-text-2)]">{subtext}</span>
       )}
     </PHSurface>
   );
@@ -392,7 +391,9 @@ export function PHScoreGauge({
         height={size}
         viewBox={`0 0 ${size} ${size}`}
         className="-rotate-90"
-        style={{ filter: `drop-shadow(0 0 10px color-mix(in oklch, ${color} 45%, transparent))` }}
+        style={{
+          filter: `drop-shadow(0 0 10px color-mix(in oklch, ${color} 45%, transparent))`,
+        }}
       >
         <circle
           cx={size / 2}

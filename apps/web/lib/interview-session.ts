@@ -18,7 +18,15 @@
 
 import { isLikelyAiEcho } from "./interview-session/echo";
 
-export type FloorState = "IDLE" | "AI_SPEAKING" | "AI_THINKING" | "USER_SPEAKING";
+function splitIntoSpeechSegments(text: string): string[] {
+  const parts = text.match(/[^.!?]+(?:[.!?]+(?:\s+|$)|$)/g);
+  if (!parts) return [text];
+  const trimmed = parts.map((p) => p.trim()).filter(Boolean);
+  return trimmed.length > 0 ? trimmed : [text];
+}
+
+export type FloorState =
+  "IDLE" | "AI_SPEAKING" | "AI_THINKING" | "USER_SPEAKING";
 
 export type InterviewSessionErrorKind =
   | "mic_permission_denied"
@@ -62,6 +70,12 @@ export interface InterviewSessionOptions {
    * gesture on this page). Call unlockAudio() from a click handler to
    * retry. */
   onAudioBlocked?: () => void;
+  /** The coordination socket dropped and we are trying to resume the
+   * interview rather than ending it. Fired once per attempt so the room can
+   * tell the candidate what is happening instead of going silent. */
+  onReconnecting?: (attempt: number, maxAttempts: number) => void;
+  /** The coordination socket is back and the server accepted the resume. */
+  onReconnected?: () => void;
 }
 
 /** Distinguishes "couldn't get a token" from "token was fine, WS wouldn't
@@ -71,6 +85,28 @@ class DeepgramTokenError extends Error {}
 const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
 const CONNECT_TIMEOUT_MS = 8000;
 const UTTERANCE_SAFETY_TIMEOUT_MS = 30_000;
+// Hard cap on how long the AI may hold the floor. Barge-in used to double as
+// the escape hatch here — candidate speech could always seize the floor back.
+// Now that the AI is never interrupted, a wedged <audio> element or a stalled
+// TTS fetch would otherwise strand the floor on the AI forever, and candidate
+// speech is dropped unconditionally while it is held. No legitimate single
+// interviewer turn comes close to this; it exists purely so the candidate can
+// never be locked out of their own interview.
+const AI_FLOOR_WATCHDOG_MS = 90_000;
+// A single sentence of TTS is a few seconds. If one segment is still "playing"
+// after this, the element is wedged rather than slow.
+const SEGMENT_PLAYBACK_TIMEOUT_MS = 60_000;
+// The /api/live/tts proxy already caps its upstream call at 30s; this bounds
+// the BROWSER side, where a stalled connection would otherwise hang forever
+// with only the AbortController (which nothing was firing) to stop it.
+const TTS_FETCH_TIMEOUT_MS = 25_000;
+// Minimum WORDS before speech during the AI's turn counts as an interruption.
+// The mic hears the AI itself whenever the candidate isn't on headphones, and
+// Deepgram transcribes that bleed (plus breaths and room noise) as one- and
+// two-word scraps. Treating those as candidate speech committed near-empty
+// turns, which the model answered with "take your time" — a loop. A genuine
+// continuation of an answer is a PHRASE, never a single word.
+const MIN_INTERRUPTION_WORDS = 5;
 const PARTIAL_MIN_GROWTH_CHARS = 12;
 const PARTIAL_THROTTLE_MS = 350;
 const SAMPLE_RATE = 16_000;
@@ -97,7 +133,11 @@ type CoordinationMessage =
  * terminalMessageHandled below) or a genuine unexpected drop. */
 const NORMAL_CLOSE_CODE = 1000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms);
     promise.then(
@@ -113,7 +153,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   });
 }
 
-function openWebSocket(url: string, protocols?: string | string[]): Promise<WebSocket> {
+function openWebSocket(
+  url: string,
+  protocols?: string | string[],
+): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
     const cleanup = () => {
@@ -142,6 +185,11 @@ export class InterviewSession {
   private readonly onError?: (error: InterviewSessionError) => void;
   private readonly onEnded?: () => void;
   private readonly onAudioBlocked?: () => void;
+  private readonly onReconnecting?: (
+    attempt: number,
+    maxAttempts: number,
+  ) => void;
+  private readonly onReconnected?: () => void;
 
   private floor: FloorState = "IDLE";
   private closed = false;
@@ -152,6 +200,7 @@ export class InterviewSession {
   private terminalMessageHandled = false;
 
   private stream: MediaStream | null = null;
+  private rawNoiseStream: MediaStream | null = null;
   private audioCtx: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private deepgramWs: WebSocket | null = null;
@@ -159,10 +208,31 @@ export class InterviewSession {
   private pendingSpeak: Promise<void> | null = null;
 
   private finalizedText = "";
+  /** Candidate words finalised while the AI held the floor. Promoted into the
+   * next utterance once the AI finishes. */
+  private interruptedText = "";
+  /** True once substantial candidate speech is seen while the AI holds the
+   * floor — set from INTERIM results too, since Deepgram only emits a final
+   * after ~1.5s of silence, which never happens when someone talks straight
+   * through the boundary. */
+  private spokeDuringAiTurn = false;
+  /** Marks the next utterance as continuing the PREVIOUS answer: the words
+   * were spoken before the candidate could have heard the current question. */
+  private continuesPrevious = false;
+  /** What the AI said BEFORE the current turn — the question the candidate is
+   * still answering. Re-displayed when their speech is re-attributed. */
+  private previousSpokenText = "";
   private lastSentPartial = "";
   private lastPartialSentAt = 0;
   private speechStartedSeen = false;
   private utteranceSafetyTimer: ReturnType<typeof setTimeout> | null = null;
+  private aiFloorWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /** Settles the in-flight segment-playback await in speak(). Pausing an
+   * <audio> element does NOT fire "ended", so without a way to resolve that
+   * promise from outside, any abort path (watchdog, close, a future
+   * barge-in) would leave speak() suspended forever — which also strands
+   * `pendingSpeak`, and with it the onEnded() redirect to the report. */
+  private currentPlaybackSettle: (() => void) | null = null;
 
   private lastAiText = "";
   private aiSpeechEndedAt: number | null = null;
@@ -179,6 +249,8 @@ export class InterviewSession {
     this.onError = options.onError;
     this.onEnded = options.onEnded;
     this.onAudioBlocked = options.onAudioBlocked;
+    this.onReconnecting = options.onReconnecting;
+    this.onReconnected = options.onReconnected;
   }
 
   get floorState(): FloorState {
@@ -190,21 +262,58 @@ export class InterviewSession {
     return this.stream?.getAudioTracks()[0] ?? null;
   }
 
+  get rawNoiseMicTrack(): MediaStreamTrack | null {
+    return (
+      this.rawNoiseStream?.getAudioTracks()[0] ??
+      this.stream?.getAudioTracks()[0] ??
+      null
+    );
+  }
+
   async connect(): Promise<void> {
     // Mic-permission wait is intentionally NOT part of the 8s race below —
     // how long a user takes to click "Allow" has nothing to do with
     // connection health, and racing it would produce false timeouts.
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          channelCount: 1,
+        },
       });
     } catch (err) {
-      this.emitError("mic_permission_denied", "Microphone access was denied or unavailable.", err);
+      this.emitError(
+        "mic_permission_denied",
+        "Microphone access was denied or unavailable.",
+        err,
+      );
       throw err;
     }
 
     try {
-      await withTimeout(this.connectTransports(), CONNECT_TIMEOUT_MS, "Connection setup timed out.");
+      this.rawNoiseStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        },
+      });
+    } catch (err) {
+      console.warn(
+        "[InterviewSession] Unprocessed noise-capture unavailable; mic noise proctoring falls back to the processed track.",
+        err,
+      );
+      this.rawNoiseStream = null;
+    }
+
+    try {
+      await withTimeout(
+        this.connectTransports(),
+        CONNECT_TIMEOUT_MS,
+        "Connection setup timed out.",
+      );
     } catch (err) {
       this.close();
       throw err;
@@ -234,7 +343,9 @@ export class InterviewSession {
 
     this.setFloor("AI_THINKING");
     if (this.coordWs?.readyState === WebSocket.OPEN) {
-      this.coordWs.send(JSON.stringify({ type: "utterance_end", text: trimmed }));
+      this.coordWs.send(
+        JSON.stringify({ type: "utterance_end", text: trimmed }),
+      );
     }
   }
 
@@ -264,53 +375,23 @@ export class InterviewSession {
       throw err;
     }
 
-    const coordUrl = `${this.agentWsBaseUrl.replace(/\/$/, "")}/api/live/session/${encodeURIComponent(this.sessionId)}`;
     try {
-      this.coordWs = await openWebSocket(coordUrl);
+      this.coordWs = await openWebSocket(this.coordinationUrl());
     } catch (err) {
-      this.emitError("coordination_connect_failed", "Could not connect to the interview session.", err);
+      this.emitError(
+        "coordination_connect_failed",
+        "Could not connect to the interview session.",
+        err,
+      );
       throw err;
     }
-    this.coordWs.addEventListener("message", (ev) => {
-      this.pendingSpeak = this.handleCoordinationMessage(ev);
-    });
-    this.coordWs.addEventListener("close", (ev) => {
-      if (this.closed) return;
-      this.closed = true;
-      void (async () => {
-        // Let the goodbye line finish playing before signalling "ended" —
-        // the server closes the socket right after sending it, which would
-        // otherwise race the still-in-flight TTS fetch/playback.
-        if (this.pendingSpeak) {
-          try {
-            await this.pendingSpeak;
-          } catch {
-            // already surfaced via onError inside speak()
-          }
-        }
-        if (this.terminalMessageHandled) {
-          // Already surfaced via onError when the error/session_conflict
-          // message arrived, just above — don't also redirect to the
-          // report page as if the interview ended normally.
-          return;
-        }
-        if (ev.code === NORMAL_CLOSE_CODE) {
-          this.onEnded?.();
-        } else {
-          // The server closed without a graceful end_interview handshake
-          // and without an explanatory message first — a genuine drop
-          // (network blip, server restart), not a completed interview.
-          this.emitError(
-            "unexpected",
-            "The interview connection was lost unexpectedly.",
-          );
-        }
-      })();
-    });
+    this.wireCoordinationSocket(this.coordWs);
 
     this.audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
     await this.audioCtx.audioWorklet.addModule("/worklets/pcm-processor.js");
-    const source = this.audioCtx.createMediaStreamSource(this.stream as MediaStream);
+    const source = this.audioCtx.createMediaStreamSource(
+      this.stream as MediaStream,
+    );
     this.workletNode = new AudioWorkletNode(this.audioCtx, "pcm-processor");
     this.workletNode.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
       if (this.deepgramWs?.readyState === WebSocket.OPEN) {
@@ -328,11 +409,14 @@ export class InterviewSession {
     let token: string;
     try {
       const res = await fetch("/api/live/deepgram-token", { method: "POST" });
-      if (!res.ok) throw new DeepgramTokenError(`token endpoint returned ${res.status}`);
+      if (!res.ok)
+        throw new DeepgramTokenError(`token endpoint returned ${res.status}`);
       const json = (await res.json()) as { access_token: string };
       token = json.access_token;
     } catch (err) {
-      throw err instanceof DeepgramTokenError ? err : new DeepgramTokenError(String(err));
+      throw err instanceof DeepgramTokenError
+        ? err
+        : new DeepgramTokenError(String(err));
     }
 
     // Sec-WebSocket-Protocol auth, NOT a query param: empirically verified
@@ -351,7 +435,15 @@ export class InterviewSession {
     dgUrl.searchParams.set("interim_results", "true");
     dgUrl.searchParams.set("vad_events", "true");
     dgUrl.searchParams.set("endpointing", "1500");
-    dgUrl.searchParams.set("utterance_end_ms", "2800");
+    // How long the candidate must be silent before their answer is treated as
+    // finished and sent for a reply. 2800ms was too short: people routinely
+    // pause that long MID-ANSWER while recalling a detail, so answers were
+    // being cut off and submitted half-finished — the substance of the answer
+    // lost, and the interviewer moving on while the candidate was still
+    // talking. The cost of raising it is ~1.2s of extra dead air after every
+    // genuine answer, which is the right trade against truncating answers.
+    // Tune HERE if turn-taking feels sluggish or cut-offs reappear.
+    dgUrl.searchParams.set("utterance_end_ms", "4000");
 
     const ws = await openWebSocket(dgUrl.toString(), ["bearer", token]);
     ws.addEventListener("message", (ev) => this.handleDeepgramMessage(ev));
@@ -368,6 +460,18 @@ export class InterviewSession {
   private deepgramReconnectAttempt = 0;
   private static readonly MAX_DEEPGRAM_RECONNECT_ATTEMPTS = 4;
 
+  private coordReconnectAttempt = 0;
+  // Longer budget than Deepgram's, and deliberately slower (1s..16s, ~31s
+  // total): the server only frees a session_id once the DEAD socket's
+  // _shutdown_sequence() has run, and after a network blip it has not yet
+  // noticed the old socket is gone. Retrying too fast just collects
+  // session_conflict rejections against our own stale connection.
+  private static readonly MAX_COORD_RECONNECT_ATTEMPTS = 5;
+  /** True between an unexpected coordination drop and a successful resume.
+   * While set, a session_conflict is treated as "our own previous socket is
+   * still being reaped" rather than "another tab has this interview". */
+  private reconnectingCoord = false;
+
   private onDeepgramClosed(closedWs: WebSocket): void {
     // Ignore close events from a socket we've already superseded (a stale
     // listener from a previous connectDeepgram() call) or our own teardown.
@@ -375,10 +479,107 @@ export class InterviewSession {
     void this.reconnectDeepgram();
   }
 
+  private coordinationUrl(): string {
+    const base = this.agentWsBaseUrl.replace(/\/$/, "");
+    return `${base}/api/live/session/${encodeURIComponent(this.sessionId)}`;
+  }
+
+  private wireCoordinationSocket(ws: WebSocket): void {
+    ws.addEventListener("message", (ev) => {
+      this.pendingSpeak = this.handleCoordinationMessage(ev);
+    });
+    ws.addEventListener("close", (ev) => {
+      if (this.closed) return;
+      // A socket we have already replaced during a reconnect — its close is
+      // history, not a new failure.
+      if (ws !== this.coordWs) return;
+
+      const graceful = ev.code === NORMAL_CLOSE_CODE;
+      if (graceful || this.terminalMessageHandled) {
+        this.closed = true;
+        void (async () => {
+          // Let the goodbye line finish playing before signalling "ended" —
+          // the server closes the socket right after sending it, which would
+          // otherwise race the still-in-flight TTS fetch/playback.
+          if (this.pendingSpeak) {
+            try {
+              await this.pendingSpeak;
+            } catch {
+              // already surfaced via onError inside speak()
+            }
+          }
+          // terminalMessageHandled: already surfaced via onError when the
+          // error/session_conflict message arrived — don't ALSO redirect to
+          // the report page as if the interview ended normally.
+          if (this.terminalMessageHandled) return;
+          this.onEnded?.();
+        })();
+        return;
+      }
+
+      // An unexpected drop (network blip, server restart). The backend keeps
+      // durable resume state for exactly this case, so try to rejoin the
+      // interview instead of ending it. Only once the retry budget is spent
+      // does this become the fatal error it used to be immediately.
+      void this.reconnectCoordination();
+    });
+  }
+
+  /** Called on any coordination message that is not a conflict rejection —
+   * proof the socket is genuinely serving this session again. */
+  private markCoordinationHealthy(): void {
+    if (!this.reconnectingCoord) return;
+    this.reconnectingCoord = false;
+    this.coordReconnectAttempt = 0;
+    this.onReconnected?.();
+  }
+
+  private async reconnectCoordination(): Promise<void> {
+    if (this.closed) return;
+    this.reconnectingCoord = true;
+    this.coordReconnectAttempt += 1;
+    if (
+      this.coordReconnectAttempt > InterviewSession.MAX_COORD_RECONNECT_ATTEMPTS
+    ) {
+      this.closed = true;
+      this.emitError(
+        "unexpected",
+        "The interview connection was lost unexpectedly.",
+      );
+      return;
+    }
+    this.onReconnecting?.(
+      this.coordReconnectAttempt,
+      InterviewSession.MAX_COORD_RECONNECT_ATTEMPTS,
+    );
+    const backoffMs = 1000 * 2 ** (this.coordReconnectAttempt - 1); // 1s..16s
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    if (this.closed) return;
+
+    try {
+      const ws = await openWebSocket(this.coordinationUrl());
+      if (this.closed) {
+        ws.close();
+        return;
+      }
+      this.coordWs = ws;
+      this.wireCoordinationSocket(ws);
+      // Deliberately NOT resetting the attempt budget here: the socket being
+      // open proves nothing yet, because the server may still reject it with
+      // session_conflict while our previous connection is reaped. The budget
+      // resets in markCoordinationHealthy(), on the first real message.
+    } catch {
+      void this.reconnectCoordination();
+    }
+  }
+
   private async reconnectDeepgram(): Promise<void> {
     if (this.closed) return;
     this.deepgramReconnectAttempt += 1;
-    if (this.deepgramReconnectAttempt > InterviewSession.MAX_DEEPGRAM_RECONNECT_ATTEMPTS) {
+    if (
+      this.deepgramReconnectAttempt >
+      InterviewSession.MAX_DEEPGRAM_RECONNECT_ATTEMPTS
+    ) {
       this.emitError(
         "deepgram_connect_failed",
         "Speech-to-text connection closed unexpectedly.",
@@ -428,16 +629,47 @@ export class InterviewSession {
     // floor. All three must pass for a fragment to count as a real barge-in:
     // real voice activity (VAD), a non-trivial fragment, and not an echo of
     // what the AI itself is saying.
+    // Barge-in stays DISABLED — the interviewer always finishes its question,
+    // so a cough or filler word can never truncate a question the candidate
+    // still needs to hear. But the speech is CAPTURED rather than discarded:
+    // words spoken before the candidate could possibly have heard the current
+    // question belong to the answer they were still giving.
     if (this.floor === "AI_SPEAKING" || this.floor === "AI_THINKING") {
-      const msSinceAiSpoke = this.floor === "AI_SPEAKING" ? 0 : (this.aiSpeechEndedAt !== null ? Date.now() - this.aiSpeechEndedAt : Infinity);
-      const gates = {
-        voiceDetected: this.speechStartedSeen,
-        substantial: text.length >= 3,
-        notEcho: !isLikelyAiEcho(text, this.lastAiText, msSinceAiSpoke),
-      };
-      if (!(gates.voiceDetected && gates.substantial && gates.notEcho)) return;
-      this.takeFloor("USER_SPEAKING");
-    } else if (this.floor === "IDLE") {
+      // Echo guard first — the AI's own voice reaching the mic is by far the
+      // biggest source of noise here.
+      if (isLikelyAiEcho(text, this.lastAiText, 0)) return;
+      const wordCount = text.split(/\s+/).filter(Boolean).length;
+      if (wordCount < MIN_INTERRUPTION_WORDS) return;
+
+      if (!this.spokeDuringAiTurn) {
+        console.info("[interruption] substantial speech during AI turn", {
+          words: wordCount,
+          text: text.slice(0, 80),
+        });
+      }
+      // Record THAT they spoke regardless of interim/final — the words
+      // themselves may only arrive later.
+      this.spokeDuringAiTurn = true;
+      if (msg.is_final) {
+        // A final closes its segment and is never re-sent, so these words
+        // exist only here. Interims are NOT buffered: Deepgram's eventual
+        // final for the same segment already contains them.
+        this.interruptedText = this.interruptedText
+          ? `${this.interruptedText} ${text}`
+          : text;
+      }
+      return;
+    }
+    if (this.floor === "IDLE") {
+      // Echo guard, still required even without barge-in: when the candidate
+      // isn't on headphones the mic keeps picking up the tail of the AI's own
+      // speech for a moment after the floor is released, and without this it
+      // would be attributed to the candidate as their answer.
+      const msSinceAiSpoke =
+        this.aiSpeechEndedAt !== null
+          ? Date.now() - this.aiSpeechEndedAt
+          : Infinity;
+      if (isLikelyAiEcho(text, this.lastAiText, msSinceAiSpoke)) return;
       this.setFloor("USER_SPEAKING");
     }
 
@@ -445,7 +677,9 @@ export class InterviewSession {
 
     // Step 3: final-fragment accumulation.
     if (isFinal) {
-      this.finalizedText = this.finalizedText ? `${this.finalizedText} ${text}` : text;
+      this.finalizedText = this.finalizedText
+        ? `${this.finalizedText} ${text}`
+        : text;
       this.onTranscript?.(this.finalizedText, true);
       this.sendPartial(this.finalizedText, true);
       return;
@@ -465,7 +699,10 @@ export class InterviewSession {
     const now = Date.now();
     if (!isFinal) {
       const grown = text.length - this.lastSentPartial.length;
-      if (!(grown >= PARTIAL_MIN_GROWTH_CHARS && now - this.lastPartialSentAt >= PARTIAL_THROTTLE_MS)) {
+      if (!(
+        grown >= PARTIAL_MIN_GROWTH_CHARS &&
+        now - this.lastPartialSentAt >= PARTIAL_THROTTLE_MS
+      )) {
         return;
       }
     }
@@ -481,6 +718,9 @@ export class InterviewSession {
     this.speechStartedSeen = false;
     this.clearUtteranceSafetyTimer();
 
+    const continuesPrevious = this.continuesPrevious;
+    this.continuesPrevious = false;
+
     if (!text) {
       if (this.floor === "USER_SPEAKING") this.setFloor("IDLE");
       return;
@@ -488,7 +728,13 @@ export class InterviewSession {
 
     this.setFloor("AI_THINKING");
     if (this.coordWs?.readyState === WebSocket.OPEN) {
-      this.coordWs.send(JSON.stringify({ type: "utterance_end", text }));
+      this.coordWs.send(
+        JSON.stringify({
+          type: "utterance_end",
+          text,
+          continues_previous: continuesPrevious,
+        }),
+      );
     }
   }
 
@@ -496,13 +742,47 @@ export class InterviewSession {
     this.clearUtteranceSafetyTimer();
     // The only two triggers that ever commit an utterance: Deepgram's own
     // UtteranceEnd event, and this watchdog if that event never arrives.
-    this.utteranceSafetyTimer = setTimeout(() => this.commitUtterance(), UTTERANCE_SAFETY_TIMEOUT_MS);
+    this.utteranceSafetyTimer = setTimeout(
+      () => this.commitUtterance(),
+      UTTERANCE_SAFETY_TIMEOUT_MS,
+    );
   }
 
   private clearUtteranceSafetyTimer(): void {
     if (this.utteranceSafetyTimer) {
       clearTimeout(this.utteranceSafetyTimer);
       this.utteranceSafetyTimer = null;
+    }
+  }
+
+  /** Last-resort guarantee that the floor always comes back to the candidate.
+   * See AI_FLOOR_WATCHDOG_MS: with barge-in disabled there is no other way
+   * out of AI_SPEAKING / AI_THINKING if playback or synthesis wedges. */
+  private armAiFloorWatchdog(): void {
+    this.clearAiFloorWatchdog();
+    this.aiFloorWatchdog = setTimeout(() => {
+      if (this.floor !== "AI_SPEAKING" && this.floor !== "AI_THINKING") return;
+      // Autoplay is blocked and we are legitimately parked waiting for the
+      // candidate to click "Enable audio" — that is not a stall, so re-arm
+      // rather than stealing the floor out from under the unlock modal.
+      if (this.pendingAudio) {
+        this.armAiFloorWatchdog();
+        return;
+      }
+      console.warn(
+        "[InterviewSession] AI held the floor past the watchdog; releasing it to the candidate.",
+      );
+      // stopAiSpeech() also settles the pending playback await, so the
+      // suspended speak() unwinds instead of leaking.
+      this.stopAiSpeech();
+      this.setFloor("IDLE");
+    }, AI_FLOOR_WATCHDOG_MS);
+  }
+
+  private clearAiFloorWatchdog(): void {
+    if (this.aiFloorWatchdog) {
+      clearTimeout(this.aiFloorWatchdog);
+      this.aiFloorWatchdog = null;
     }
   }
 
@@ -518,6 +798,11 @@ export class InterviewSession {
       // audio queued in the worklet doesn't get sent once the floor flips.
       this.workletNode?.port.postMessage("clear");
       this.speechStartedSeen = false;
+      // Re-armed on the THINKING -> SPEAKING hop too, so the clock covers
+      // synthesis and playback separately rather than sharing one budget.
+      this.armAiFloorWatchdog();
+    } else {
+      this.clearAiFloorWatchdog();
     }
     if (next === "USER_SPEAKING" && prev !== "USER_SPEAKING") {
       this.armUtteranceSafetyTimer();
@@ -527,6 +812,51 @@ export class InterviewSession {
     }
 
     this.onFloorChange?.(next);
+
+    // After onFloorChange so listeners see IDLE first, and after the state
+    // assignments above so the nested setFloor() inside behaves normally.
+    if ((prev === "AI_SPEAKING" || prev === "AI_THINKING") && next === "IDLE") {
+      this.promoteInterruptedSpeech();
+    }
+  }
+
+  /** The AI has finished its turn. Anything the candidate said while it was
+   * speaking cannot have been a reply to a question they were still hearing,
+   * so it continues the answer they were already giving: captured words
+   * become the PREFIX of the next utterance, and that utterance is flagged so
+   * the server appends it to the previous answer rather than recording it
+   * against the question just asked. */
+  private promoteInterruptedSpeech(): void {
+    const captured = this.interruptedText.trim();
+    this.interruptedText = "";
+    const spoke = this.spokeDuringAiTurn;
+    this.spokeDuringAiTurn = false;
+    if (!spoke || this.closed) return;
+
+    console.info("[interruption] re-attributing to the previous question", {
+      capturedWords: captured ? captured.split(/\s+/).length : 0,
+      mode: captured ? "buffered-final" : "interim-only",
+    });
+
+    this.continuesPrevious = true;
+
+    // Show the question they were actually still answering — without this the
+    // re-attribution is invisible even when it works.
+    if (this.previousSpokenText) {
+      this.onQuestionText?.(this.previousSpokenText);
+    }
+
+    if (captured) {
+      this.finalizedText = this.finalizedText
+        ? `${this.finalizedText} ${captured}`
+        : captured;
+      this.onTranscript?.(this.finalizedText, true);
+    }
+
+    // Hand the floor over so the normal silence-based commitUtterance() path
+    // finishes this utterance — they are usually still mid-sentence, and the
+    // rest must land in the SAME utterance rather than a separate one.
+    this.setFloor("USER_SPEAKING");
   }
 
   private takeFloor(next: FloorState): void {
@@ -549,23 +879,54 @@ export class InterviewSession {
       this.pendingAudio.src = "";
       this.pendingAudio = null;
     }
+    // Release speak()'s in-flight playback await. pause() does NOT emit
+    // "ended", so without this every abort path would leave that promise
+    // pending forever — stranding speak(), and with it `pendingSpeak`, whose
+    // completion the close handler waits on before firing onEnded().
+    const settle = this.currentPlaybackSettle;
+    this.currentPlaybackSettle = null;
+    settle?.();
   }
 
   // --- Coordination WS + TTS playback --------------------------------------
 
-  private async handleCoordinationMessage(ev: MessageEvent<string>): Promise<void> {
+  private async handleCoordinationMessage(
+    ev: MessageEvent<string>,
+  ): Promise<void> {
     let msg: CoordinationMessage;
     try {
       msg = JSON.parse(ev.data);
     } catch {
+      console.error(
+        "[InterviewSession] Failed to parse coordination message:",
+        ev.data,
+      );
       return;
     }
+    console.log(
+      "[InterviewSession] Received coordination message:",
+      msg.type,
+      msg,
+    );
     if (msg.type === "error") {
       this.terminalMessageHandled = true;
-      this.emitError("unexpected", String(msg.message ?? "The interview session reported an error."));
+      this.emitError(
+        "unexpected",
+        String(msg.message ?? "The interview session reported an error."),
+      );
       return;
     }
     if (msg.type === "session_conflict") {
+      if (this.reconnectingCoord) {
+        // We are mid-reconnect, so this is almost certainly OUR OWN previous
+        // socket still holding the session_id — the server only releases it
+        // once that connection's shutdown sequence has run, which lags a
+        // network drop. Treat it as retryable: returning without marking it
+        // terminal lets the close that follows fall through to another
+        // backoff attempt. A genuine "two tabs open" case simply exhausts
+        // the budget and surfaces the same fatal error as before.
+        return;
+      }
       this.terminalMessageHandled = true;
       this.emitError(
         "unexpected",
@@ -576,14 +937,42 @@ export class InterviewSession {
       );
       return;
     }
-    if (msg.type !== "speak") return;
+
+    // Reached only for non-conflict traffic, which proves the socket is
+    // genuinely serving this session again (the server sends session_resumed
+    // on a successful rejoin, then normal traffic). MUST stay below the
+    // conflict branch: clearing the flag above it would make a
+    // reconnect-time conflict look terminal, which is the exact case this
+    // whole path exists to survive.
+    this.markCoordinationHealthy();
+    if (msg.type !== "speak") {
+      console.log(
+        "[InterviewSession] Ignoring non-speak message type:",
+        msg.type,
+      );
+      return;
+    }
 
     const text = String((msg as { text?: string }).text ?? "").trim();
-    if (!text) return;
+    console.log(
+      "[InterviewSession] Processing speak message, text length:",
+      text.length,
+    );
+    if (!text) {
+      console.warn("[InterviewSession] Speak message has empty text");
+      return;
+    }
+    console.log(
+      "[InterviewSession] Calling speak() with text:",
+      text.substring(0, 100),
+    );
     await this.speak(text);
   }
 
   private async speak(text: string): Promise<void> {
+    // What the AI said BEFORE this turn is the question the candidate is
+    // still answering if they talk over the current one.
+    if (this.lastAiText) this.previousSpokenText = this.lastAiText;
     this.lastAiText = text;
     this.onQuestionText?.(text);
     this.setFloor("AI_THINKING");
@@ -591,59 +980,109 @@ export class InterviewSession {
     const controller = new AbortController();
     this.ttsAbortController = controller;
 
-    let audioBlob: Blob;
-    try {
+    const fetchSegment = async (segment: string): Promise<Blob> => {
+      // Bound the browser side too. Older engines without AbortSignal.any /
+      // .timeout fall back to the bare controller — the floor watchdog is
+      // still the backstop there.
+      const signal =
+        typeof AbortSignal.any === "function" &&
+        typeof AbortSignal.timeout === "function"
+          ? AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(TTS_FETCH_TIMEOUT_MS),
+            ])
+          : controller.signal;
       const res = await fetch("/api/live/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: controller.signal,
+        body: JSON.stringify({ text: segment }),
+        signal,
       });
       if (!res.ok) throw new Error(`tts endpoint returned ${res.status}`);
-      audioBlob = await res.blob();
-    } catch (err) {
-      if (controller.signal.aborted) return; // barged-in mid-fetch — not a real error
-      this.emitError("tts_failed", "Could not generate speech audio.", err);
-      if (this.floor === "AI_THINKING") this.setFloor("IDLE");
-      return;
-    }
+      return res.blob();
+    };
 
-    if (controller.signal.aborted || this.closed) return;
+    const segments = splitIntoSpeechSegments(text);
+    let nextFetch: Promise<Blob> | null = fetchSegment(segments[0]!);
+    let spokeAnySegment = false;
 
-    const url = URL.createObjectURL(audioBlob);
-    const audio = new Audio(url);
-    this.currentAudio = audio;
-    this.setFloor("AI_SPEAKING");
-
-    await new Promise<void>((resolve) => {
-      const cleanup = () => {
-        URL.revokeObjectURL(url);
-        resolve();
-      };
-      audio.addEventListener("ended", cleanup, { once: true });
-      audio.addEventListener("error", cleanup, { once: true });
-      audio.play().catch((err) => {
-        if (err instanceof DOMException && err.name === "NotAllowedError") {
-          // Autoplay blocked — stash it and wait for unlockAudio() to retry
-          // from a real user gesture; "ended"/"error" above still resolve
-          // this promise once that succeeds (or the barge-in path aborts it).
-          this.pendingAudio = audio;
-          this.onAudioBlocked?.();
-          return;
+    for (let i = 0; i < segments.length; i++) {
+      let blob: Blob;
+      try {
+        blob = await nextFetch!;
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        this.emitError("tts_failed", "Could not generate speech audio.", err);
+        if (this.floor === "AI_THINKING" || this.floor === "AI_SPEAKING") {
+          this.setFloor("IDLE");
         }
-        cleanup();
-      });
-    });
+        return;
+      }
+      if (controller.signal.aborted || this.closed) return;
 
-    // Guard against a barge-in having already started a newer speak() call
-    // while this one was still awaiting playback — don't let a stale call
-    // clobber floor state set by the newer one.
-    if (this.currentAudio === audio) {
-      this.currentAudio = null;
-      this.ttsAbortController = null;
-      this.aiSpeechEndedAt = Date.now();
-      if (this.floor === "AI_SPEAKING") this.setFloor("IDLE");
+      if (i + 1 < segments.length) {
+        nextFetch = fetchSegment(segments[i + 1]!);
+      }
+
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      this.currentAudio = audio;
+      if (!spokeAnySegment) {
+        this.setFloor("AI_SPEAKING");
+        spokeAnySegment = true;
+      }
+
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (stallTimer) clearTimeout(stallTimer);
+          if (this.currentPlaybackSettle === finish) {
+            this.currentPlaybackSettle = null;
+          }
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        // Hand stopAiSpeech() a way to unwind this await (watchdog / close).
+        this.currentPlaybackSettle = finish;
+
+        audio.addEventListener("ended", finish, { once: true });
+        audio.addEventListener("error", finish, { once: true });
+        // Arm the stall timeout only once playback has genuinely STARTED.
+        // Arming it on play() instead would time out an autoplay-blocked
+        // element that is correctly parked waiting for unlockAudio().
+        audio.addEventListener(
+          "playing",
+          () => {
+            if (settled) return;
+            stallTimer = setTimeout(finish, SEGMENT_PLAYBACK_TIMEOUT_MS);
+          },
+          { once: true },
+        );
+
+        audio.play().catch((err) => {
+          if (err instanceof DOMException && err.name === "NotAllowedError") {
+            // Autoplay blocked — park until unlockAudio() retries from a real
+            // user gesture. "playing"/"ended" above still settle this then.
+            this.pendingAudio = audio;
+            this.onAudioBlocked?.();
+            return;
+          }
+          finish();
+        });
+      });
+
+      if (this.currentAudio !== audio) return;
+      if (controller.signal.aborted || this.closed) return;
     }
+
+    this.currentAudio = null;
+    this.ttsAbortController = null;
+    this.aiSpeechEndedAt = Date.now();
+    if (this.floor === "AI_SPEAKING") this.setFloor("IDLE");
   }
 
   // --- Teardown -------------------------------------------------------------
@@ -653,6 +1092,7 @@ export class InterviewSession {
     this.closed = true;
 
     this.clearUtteranceSafetyTimer();
+    this.clearAiFloorWatchdog();
     this.stopAiSpeech();
 
     if (this.workletNode) {
@@ -664,6 +1104,10 @@ export class InterviewSession {
       for (const track of this.stream.getTracks()) track.stop();
       this.stream = null;
     }
+    if (this.rawNoiseStream) {
+      for (const track of this.rawNoiseStream.getTracks()) track.stop();
+      this.rawNoiseStream = null;
+    }
     if (this.audioCtx) {
       this.audioCtx.close().catch(() => {});
       this.audioCtx = null;
@@ -671,7 +1115,8 @@ export class InterviewSession {
     if (this.deepgramWs) {
       this.deepgramWs.onmessage = null;
       this.deepgramWs.onclose = null;
-      if (this.deepgramWs.readyState === WebSocket.OPEN) this.deepgramWs.close();
+      if (this.deepgramWs.readyState === WebSocket.OPEN)
+        this.deepgramWs.close();
       this.deepgramWs = null;
     }
     if (this.coordWs) {
@@ -683,7 +1128,11 @@ export class InterviewSession {
     this.floor = "IDLE";
   }
 
-  private emitError(kind: InterviewSessionErrorKind, message: string, cause?: unknown): void {
+  private emitError(
+    kind: InterviewSessionErrorKind,
+    message: string,
+    cause?: unknown,
+  ): void {
     this.onError?.({ kind, message, cause });
   }
 }

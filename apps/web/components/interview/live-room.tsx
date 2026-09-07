@@ -293,7 +293,8 @@ function LiveSession({
     connectionState === ConnectionState.Reconnecting ||
     connectionState === ConnectionState.SignalReconnecting;
 
-  const { localParticipant, isMicrophoneEnabled, microphoneTrack } = useLocalParticipant();
+  const { localParticipant, isMicrophoneEnabled, microphoneTrack } =
+    useLocalParticipant();
   const transcriptions = useTranscriptions();
   const { mergedProps: startAudioProps, canPlayAudio } = useStartAudio({
     props: {},

@@ -19,14 +19,17 @@ export const dynamic = "force-dynamic";
 export async function POST() {
   try {
     const secret = serverEnv.internalApiSecret;
-    const upstream = await fetch(`${serverEnv.agentApiUrl}/api/live/deepgram-token`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(secret ? { "x-internal-secret": secret } : {}),
+    const upstream = await fetch(
+      `${serverEnv.agentApiUrl}/api/live/deepgram-token`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(secret ? { "x-internal-secret": secret } : {}),
+        },
+        signal: AbortSignal.timeout(15_000),
       },
-      signal: AbortSignal.timeout(15_000),
-    });
+    );
     if (!upstream.ok) {
       const detail = await upstream.text().catch(() => "");
       return NextResponse.json(

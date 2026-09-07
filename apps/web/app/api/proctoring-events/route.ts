@@ -55,22 +55,27 @@ export async function POST(request: Request) {
 
   try {
     const secret = serverEnv.internalApiSecret;
-    const upstream = await fetch(`${serverEnv.agentApiUrl}/api/proctoring-events`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(secret ? { "x-internal-secret": secret } : {}),
+    const upstream = await fetch(
+      `${serverEnv.agentApiUrl}/api/proctoring-events`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(secret ? { "x-internal-secret": secret } : {}),
+        },
+        body: JSON.stringify(parsed.data),
+        signal: AbortSignal.timeout(10_000),
       },
-      body: JSON.stringify(parsed.data),
-      signal: AbortSignal.timeout(10_000),
-    });
+    );
     if (!upstream.ok) {
       return NextResponse.json(fallbackResponse(parsed.data));
     }
     const json = await upstream.json();
     const parsedResponse = ProctoringEventResponseSchema.safeParse(json);
     return NextResponse.json(
-      parsedResponse.success ? parsedResponse.data : fallbackResponse(parsed.data),
+      parsedResponse.success
+        ? parsedResponse.data
+        : fallbackResponse(parsed.data),
     );
   } catch {
     return NextResponse.json(fallbackResponse(parsed.data));

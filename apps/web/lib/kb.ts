@@ -1,8 +1,4 @@
-import type {
-  KbQueryResponse,
-  Citation,
-  Language,
-} from "@proven-hire/shared";
+import type { KbQueryResponse, Citation, Language } from "@proven-hire/shared";
 
 export type { KbQueryResponse, Citation };
 

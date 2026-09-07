@@ -9,11 +9,7 @@
  */
 
 export type PHVerdict =
-  | "STRONG_HIRE"
-  | "HIRE"
-  | "MAYBE"
-  | "NO_HIRE"
-  | "INSUFFICIENT_DATA";
+  "STRONG_HIRE" | "HIRE" | "MAYBE" | "NO_HIRE" | "INSUFFICIENT_DATA";
 
 /** Simple, explicit score → verdict mapping used where the backend doesn't
  * (yet) produce a hiring verdict directly — ScoreCard only has `overall_score`

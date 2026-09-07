@@ -17,6 +17,9 @@ export const publicEnv = {
   get appUrl(): string {
     return process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
   },
+  get agentApiUrl(): string {
+    return process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:8000";
+  },
 };
 
 /** Server-only config. Never imported into client components. */

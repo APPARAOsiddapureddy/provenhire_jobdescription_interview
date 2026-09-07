@@ -1,5 +1,11 @@
 import type { ReactNode } from "react";
-import { Fraunces, Geist, Geist_Mono, Inter, JetBrains_Mono } from "next/font/google";
+import {
+  Fraunces,
+  Geist,
+  Geist_Mono,
+  Inter,
+  JetBrains_Mono,
+} from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({
@@ -43,14 +49,16 @@ export const metadata = {
     process.env.NEXT_PUBLIC_SITE_URL ?? "https://proven-hire.ai",
   ),
   title: {
-    default: "Proven Hire Job Description Interview — Practice the interview out loud",
+    default:
+      "Proven Hire Job Description Interview — Practice the interview out loud",
     template: "%s · Proven Hire Job Description Interview",
   },
   description:
     "Open-source, voice-first AI mock interviews. Proven Hire Job Description Interview reads your CV and the job, researches the company, runs an adaptive voice interview, then shows you exactly what to fix. English-first, 10+ languages.",
   applicationName: "Proven Hire Job Description Interview",
   openGraph: {
-    title: "Proven Hire Job Description Interview — Practice the interview out loud",
+    title:
+      "Proven Hire Job Description Interview — Practice the interview out loud",
     description:
       "Open-source, voice-first AI mock interviews — practice out loud, then pass the real one.",
     url: "/",
@@ -59,7 +67,8 @@ export const metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Proven Hire Job Description Interview — Practice the interview out loud",
+    title:
+      "Proven Hire Job Description Interview — Practice the interview out loud",
     description:
       "Open-source, voice-first AI mock interviews — practice out loud, then pass the real one.",
   },

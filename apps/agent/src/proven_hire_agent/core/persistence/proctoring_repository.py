@@ -15,7 +15,7 @@ for why that lives in a pure function instead of here.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ...shared_models import ProctoringEvent, ProctoringEventCreate
@@ -45,7 +45,7 @@ class MemoryRepository:
     async def record_event(self, event: ProctoringEventCreate) -> ProctoringEvent:
         row = ProctoringEvent(
             id=str(uuid.uuid4()),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             **event.model_dump(),
         )
         self._events.setdefault(event.session_id, []).append(row)

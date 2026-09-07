@@ -99,8 +99,7 @@ jobs:
       - name: Build + push API image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: apps/agent/Dockerfile
+          context: ./apps/agent
           target: api
           push: true
           cache-from: type=gha
@@ -112,8 +111,7 @@ jobs:
       - name: Build + push worker image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: apps/agent/Dockerfile
+          context: ./apps/agent
           target: worker
           push: true
           cache-from: type=gha

@@ -27,6 +27,15 @@ export const IntegritySettingsSchema = z.object({
   microphone_monitoring: IntegrityRuleStateSchema,
   // Multi-face / phone / no-face / low-light, one combined toggle.
   camera_ai_detection: IntegrityRuleStateSchema,
+  // Head-pose "looking away" analysis. Deliberately a LOGGED-ONLY signal:
+  // it never shows the candidate a banner, never counts toward a strike,
+  // and carries weight 0 in proctoring-weights.json so it can't contribute
+  // to an auto-end. Head pose at webcam resolution cannot distinguish
+  // "reading off a second screen" from ordinary thinking-while-looking-away,
+  // an off-centre webcam, or a candidate who avoids eye contact — it exists
+  // to give a human reviewer a signal, not to make a decision.
+  // `.default()` keeps rows written before this column existed loadable.
+  gaze_detection: IntegrityRuleStateSchema.default("off"),
   // Auto-end after 3 repeated alerts for the SAME rule class. Only takes
   // effect when this field itself is "strict" — copy-paste never counts
   // toward strikes regardless of this setting.
@@ -44,16 +53,17 @@ export type IntegritySettings = z.infer<typeof IntegritySettingsSchema>;
 
 /** All rules OFF — the safe default when nothing is configured yet. */
 export const DEFAULT_INTEGRITY_SETTINGS: IntegritySettings = {
-  ai_behavior_analysis: "off",
-  camera_required: "off",
+  ai_behavior_analysis: "strict",
+  camera_required: "strict",
   copy_paste_detection: "off",
   devtools_detection: "off",
-  fullscreen_required: "off",
-  microphone_monitoring: "off",
-  camera_ai_detection: "off",
-  three_strike_auto_end: "off",
+  fullscreen_required: "strict",
+  microphone_monitoring: "strict",
+  camera_ai_detection: "strict",
+  gaze_detection: "monitor",
+  three_strike_auto_end: "strict",
   screen_recording_enabled: "off",
-  tab_switching_detection: "off",
+  tab_switching_detection: "strict",
 };
 
 /** Named presets offered on the settings page (client-side fill only). */
@@ -69,6 +79,7 @@ export const INTEGRITY_PRESETS: Record<
     fullscreen_required: "off",
     microphone_monitoring: "off",
     camera_ai_detection: "off",
+    gaze_detection: "off",
     three_strike_auto_end: "off",
     screen_recording_enabled: "off",
     tab_switching_detection: "monitor",
@@ -81,6 +92,7 @@ export const INTEGRITY_PRESETS: Record<
     fullscreen_required: "strict",
     microphone_monitoring: "strict",
     camera_ai_detection: "strict",
+    gaze_detection: "monitor",
     three_strike_auto_end: "strict",
     screen_recording_enabled: "strict",
     tab_switching_detection: "strict",

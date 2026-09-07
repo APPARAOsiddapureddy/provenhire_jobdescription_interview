@@ -11,7 +11,7 @@ proxying through ``apps/web/app/api/proctoring-events/route.ts``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 
@@ -46,6 +46,6 @@ async def post_proctoring_event(req: ProctoringEventCreate) -> ProctoringEventRe
 
     event = await deps.proctoring_repo.record_event(req)
     events = await deps.proctoring_repo.list_events(req.session_id)
-    score = compute_strike_score(events, now=datetime.now(timezone.utc))
+    score = compute_strike_score(events, now=datetime.now(UTC))
     ban_triggered = is_ban_threshold_exceeded(score, deps.settings.proctoring_strike_threshold)
     return ProctoringEventResponse(event=event, score=score, ban_triggered=ban_triggered)

@@ -14,7 +14,7 @@ capability-guarded: ids are unguessable uuid4.)
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,7 +67,7 @@ async def get_session(session_id: str) -> SessionView:
     if view.status not in TERMINAL_STATUSES:
         events = await deps.proctoring_repo.list_events(session_id)
         if events:
-            score = compute_strike_score(events, now=datetime.now(timezone.utc))
+            score = compute_strike_score(events, now=datetime.now(UTC))
             view = view.model_copy(update={"proctoring_score": score})
     return view
 

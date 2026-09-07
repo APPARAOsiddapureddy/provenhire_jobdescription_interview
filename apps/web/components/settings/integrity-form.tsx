@@ -65,6 +65,12 @@ const RULES: {
       "Detect multiple faces, phones, absence, and low light in camera view",
   },
   {
+    key: "gaze_detection",
+    label: "Gaze / head-pose analysis (logged only)",
+    description:
+      "Log sustained looking-away for human review after the interview. Never warns the candidate and never auto-ends a session — head pose cannot tell thinking apart from reading off-screen.",
+  },
+  {
     key: "three_strike_auto_end",
     label: "3-strike auto-end (strict proctoring)",
     description:

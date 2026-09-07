@@ -365,6 +365,10 @@ class IntegritySettings(BaseModel):
     fullscreen_required: IntegrityRuleState
     microphone_monitoring: IntegrityRuleState
     camera_ai_detection: IntegrityRuleState
+    # Logged-only head-pose signal; see integrity.ts for why it never gates
+    # or ends an interview. Defaulted so rows written before this column
+    # existed still validate.
+    gaze_detection: IntegrityRuleState = "off"
     three_strike_auto_end: IntegrityRuleState
     screen_recording_enabled: IntegrityRuleState
     tab_switching_detection: IntegrityRuleState

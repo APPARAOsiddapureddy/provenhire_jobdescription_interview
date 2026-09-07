@@ -43,15 +43,36 @@ export function IntegrityBanner({ banner }: { banner: IntegrityBannerData }) {
  * plan's Phase 6); showing an auto-end timer here today would risk ending
  * brand-new sessions before the candidate has had a chance to react.
  */
-export function FullscreenRequiredModal({ onContinue }: { onContinue: () => void }) {
+export function FullscreenRequiredModal({
+  onContinue,
+  warning,
+}: {
+  onContinue: () => void;
+  /** Strike-count text for a mid-session exit. This modal is a full-screen
+   * overlay, so it covers the IntegrityBanner — without surfacing the
+   * warning here the candidate never sees how many strikes they have left
+   * on the one rule whose violation always raises a modal. */
+  warning?: string | null;
+}) {
   return (
     <ModalScaffold titleId="ph-fullscreen-required-title">
-      <p id="ph-fullscreen-required-title" className="text-[19px] font-semibold text-white">
+      <p
+        id="ph-fullscreen-required-title"
+        className="text-[19px] font-semibold text-white"
+      >
         Fullscreen required
       </p>
       <p className="text-[13px] leading-relaxed text-white/60">
         This assessment requires fullscreen mode. Click below to continue.
       </p>
+      {warning && (
+        <p
+          role="alert"
+          className="rounded-md bg-[#3a1010] px-3 py-2 text-[13px] leading-relaxed text-white"
+        >
+          {warning}
+        </p>
+      )}
       <PHButton variant="primary" onClick={onContinue}>
         Enter fullscreen
       </PHButton>
@@ -78,8 +99,8 @@ export function ProctoringBanModal({ onTimeout }: { onTimeout: () => void }) {
         Assessment ending
       </p>
       <p className="text-[13px] leading-relaxed text-white/60">
-        Repeated integrity violations were detected during this session.
-        Ending in{" "}
+        Repeated integrity violations were detected during this session. Ending
+        in{" "}
         <span className="font-mono font-semibold text-[var(--ph-red)]">
           {secondsLeft}s
         </span>

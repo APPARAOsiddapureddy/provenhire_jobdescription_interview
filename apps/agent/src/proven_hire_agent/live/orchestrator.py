@@ -36,8 +36,9 @@ Gemini-live adapter is explicitly deferred, not built here.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..core.logging import get_logger
 from . import state

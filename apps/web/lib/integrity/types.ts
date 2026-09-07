@@ -1,4 +1,7 @@
-import type { IntegrityRuleState, ProctoringSeverity } from "@proven-hire/shared";
+import type {
+  IntegrityRuleState,
+  ProctoringSeverity,
+} from "@proven-hire/shared";
 
 /**
  * The rule classes a live guard hook can report against. `screen_recording_enabled`
@@ -10,7 +13,8 @@ export type GuardRuleClass =
   | "devtools_detection"
   | "copy_paste_detection"
   | "microphone_monitoring"
-  | "camera_ai_detection";
+  | "camera_ai_detection"
+  | "gaze_detection";
 
 /**
  * A guard hook's report: "something happened for this rule." Severity/strike
@@ -28,7 +32,15 @@ export type ReportViolation = (
   rule: GuardRuleClass,
   eventType: string,
   message: string,
-  opts?: { photo?: string; severity?: ProctoringSeverity },
+  opts?: {
+    photo?: string;
+    severity?: ProctoringSeverity;
+    /** Persist to the proctoring event log but show the candidate NOTHING —
+     * no banner, no block, no strike. For signals useful to a human reviewer
+     * afterwards but far too noisy to interrupt an interview over (gaze /
+     * head pose). Distinct from MONITOR, which still surfaces a banner. */
+    silent?: boolean;
+  },
 ) => void;
 
 /** True whenever a rule is anything other than fully disabled. */

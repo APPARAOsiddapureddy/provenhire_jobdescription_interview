@@ -52,8 +52,7 @@ export function ToggleRow({
   >({});
 
   function selectByOffset(fromIndex: number, offset: number) {
-    const nextIndex =
-      (fromIndex + offset + STATES.length) % STATES.length;
+    const nextIndex = (fromIndex + offset + STATES.length) % STATES.length;
     const next = STATES[nextIndex]!;
     onChange(next);
     buttonRefs.current[next]?.focus();

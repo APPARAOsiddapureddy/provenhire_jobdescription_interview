@@ -15,6 +15,7 @@ at an unreachable example.com — green without network access.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -29,6 +30,7 @@ from ..shared_models import (
     JobSpec,
     PlannedQuestion,
     QuestionPlan,
+    RubricItem,
 )
 from . import role_packs
 from .cv_extract import extract_cv_text
@@ -389,7 +391,11 @@ async def general_round(state: PrepState, deps: Deps) -> PrepState:
     pinned = _pin_general_followups(pinned, budget)
     pinned = _reid(pinned, "gen")
     await _mark(state, deps, "general_round")
-    return {"general_questions": pinned}
+    # Carried through to assemble_plan's competency-coverage check — the
+    # allocation this round was actually GIVEN, so a shortfall (e.g. from
+    # dedup removing the only question on a must-have competency) is
+    # detectable instead of silently shipping.
+    return {"general_questions": pinned, "technical_counts": counts}
 
 
 async def coding_round(state: PrepState, deps: Deps) -> PrepState:
@@ -489,6 +495,181 @@ async def behavioral_round(state: PrepState, deps: Deps) -> PrepState:
     return {"behavioral_questions": pinned}
 
 
+# --- post-generation quality pass -------------------------------------------
+#
+# The three rounds above are independent LLM calls that run IN PARALLEL and
+# cannot see each other's output, and even within one round nothing was
+# previously checking that the model actually followed its own instructions
+# (rising difficulty, rubric weights summing to ~1.0). This section is a
+# deterministic, no-extra-LLM-call pass that catches the failure modes that
+# fall out of that: duplicate questions across rounds, unnormalized rubric
+# weights (which scoring reads directly), and technical difficulty that
+# doesn't actually rise. Nothing here can fail closed — every function
+# degrades to "leave the questions as they are" rather than raising, since a
+# quality pass must never be the reason prep fails.
+
+# Word-overlap (Jaccard) similarity, not character-level (difflib
+# SequenceMatcher). Measured against real question pairs before picking this:
+# character-level matching is fooled by word reordering — "tell me about a
+# challenging project" vs "tell me about a project that was challenging"
+# scored LOWER (0.69) than two genuinely different behavioral questions that
+# merely share the same scaffold ("tell me about a time you led a project"
+# vs "...you mentored a junior engineer", 0.70) — i.e. it would have missed
+# the real duplicate while risking a false positive on unrelated questions.
+# Word-overlap cleanly separates them (0.82 vs 0.43) because it only cares
+# WHICH words appear, not their order.
+#
+# Known limitation, accepted rather than hidden: this cannot catch a
+# duplicate reworded with different vocabulary (e.g. "disagreed with a
+# teammate" vs "had a conflict with a colleague" scores 0.20 — genuinely the
+# same question, but not flagged). Catching that needs semantic/embedding
+# similarity, which means another network call; out of scope for a
+# deterministic, no-extra-LLM-call pass. This catches the reordering/
+# rewording case, which is what's actually been observed.
+_DUPLICATE_SIMILARITY_THRESHOLD = 0.65
+_RUBRIC_WEIGHT_TOLERANCE = 0.05
+
+
+def _normalize_for_comparison(text: str) -> str:
+    """Lowercase + strip punctuation so two questions that differ only in
+    phrasing (not substance) are still recognized as the same ask."""
+    lowered = text.lower()
+    stripped = re.sub(r"[^\w\s]", "", lowered)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _word_overlap_similarity(a: str, b: str) -> float:
+    """Jaccard similarity over word sets: |intersection| / |union|. See the
+    comment on _DUPLICATE_SIMILARITY_THRESHOLD for why this beats
+    character-level matching for this specific job."""
+    words_a, words_b = set(a.split()), set(b.split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _question_text(q: PlannedQuestion, primary_lang: str) -> str:
+    return q.text.get(primary_lang) or q.text.get("en") or next(iter(q.text.values()), "")
+
+
+# The coding round is a structural invariant (see test_prep.py: exactly ONE
+# coding-round question is REQUIRED — that's the interview's single live
+# think-aloud problem, deterministically chosen by role_packs, not optional
+# content). It must never be the one DROPPED by a text-similarity coincidence
+# — found by testing, not assumed: under MockLLM every round's placeholder
+# text is literally identical ("mock"), so coding's question (processed
+# after technical, per _SECTION_ORDER) collided with an earlier technical
+# question's text and got silently deleted, breaking that invariant. Exempt
+# from being dropped, not from the comparison entirely — a later question
+# duplicating a coding question can still be correctly flagged against it.
+_DEDUPE_EXEMPT_SECTIONS = {"coding"}
+
+
+def _dedupe_questions(
+    questions: list[PlannedQuestion], primary_lang: str
+) -> tuple[list[PlannedQuestion], list[str]]:
+    """Drop later near-duplicates. ``questions`` is already in
+    ``_SECTION_ORDER`` (intro, behavioral, technical, coding, wrap), so "keep
+    the first occurrence" naturally keeps the EARLIER-asked copy and drops
+    whichever later round redundantly re-asked the same thing — e.g. general
+    and behavioral both independently landing on "tell me about a challenging
+    project you worked on." Returns (kept_questions, dropped_descriptions) so
+    the caller can log what happened.
+    """
+    kept: list[PlannedQuestion] = []
+    kept_norm: list[str] = []
+    dropped: list[str] = []
+    for q in questions:
+        norm = _normalize_for_comparison(_question_text(q, primary_lang))
+        if not norm or q.section in _DEDUPE_EXEMPT_SECTIONS:
+            kept.append(q)
+            kept_norm.append(norm)
+            continue
+        is_dup = any(
+            _word_overlap_similarity(norm, prior) >= _DUPLICATE_SIMILARITY_THRESHOLD
+            for prior in kept_norm
+            if prior
+        )
+        if is_dup:
+            dropped.append(f"{q.section}/{q.id}: {_question_text(q, primary_lang)[:80]}")
+            continue
+        kept.append(q)
+        kept_norm.append(norm)
+    return kept, dropped
+
+
+def _normalize_rubric_weights(questions: list[PlannedQuestion]) -> list[PlannedQuestion]:
+    """Rescale each question's rubric weights to sum to 1.0, proportionally
+    (preserving the model's relative emphasis across criteria). Scoring reads
+    these weights directly — an unchecked miss here (weights summing to 1.6,
+    or 0.4) silently distorts a candidate's score with nothing to catch it.
+    """
+    fixed: list[PlannedQuestion] = []
+    for q in questions:
+        if not q.rubric:
+            fixed.append(q)
+            continue
+        total = sum(item.weight for item in q.rubric)
+        if abs(total - 1.0) <= _RUBRIC_WEIGHT_TOLERANCE:
+            fixed.append(q)
+            continue
+        rescaled: list[RubricItem]
+        if total > 0:
+            rescaled = [item.model_copy(update={"weight": item.weight / total}) for item in q.rubric]
+        else:
+            even = 1.0 / len(q.rubric)
+            rescaled = [item.model_copy(update={"weight": even}) for item in q.rubric]
+        fixed.append(q.model_copy(update={"rubric": rescaled}))
+    return fixed
+
+
+def _reorder_technical_by_difficulty(questions: list[PlannedQuestion]) -> list[PlannedQuestion]:
+    """Best-effort repair for the prompt's "rising difficulty 1-5 across the
+    technical section" rule, which nothing previously enforced.
+
+    The LAST technical question is the signature/case question (see
+    ``_pin_general_followups``, which already gave it the deep follow-up
+    tree by that same "last technical question" rule) and is deliberately
+    left in place regardless of its own difficulty score — moving it would
+    strand its follow-up tree in the middle of the section, which is a worse
+    outcome than tolerating one non-monotonic step right before it.
+    """
+    technical_idx = [i for i, q in enumerate(questions) if q.section == "technical"]
+    if len(technical_idx) < 2:
+        return questions
+    signature_idx = technical_idx[-1]
+    reorderable_idx = [i for i in technical_idx if i != signature_idx]
+    reordered = sorted((questions[i] for i in reorderable_idx), key=lambda q: q.difficulty)
+    result = list(questions)
+    for pos, q in zip(reorderable_idx, reordered, strict=True):
+        result[pos] = q
+    return result
+
+
+def _check_competency_coverage(
+    questions: list[PlannedQuestion], expected_counts: dict[str, int]
+) -> list[str]:
+    """Detection only — fixing a shortfall would mean generating a NEW
+    question, which is a real LLM call and out of scope for a deterministic
+    pass. Surfacing it as a warning at least makes a silent coverage gap
+    (e.g. dedup removed the only question probing a must-have competency)
+    visible instead of invisible.
+    """
+    actual: dict[str, int] = {}
+    for q in questions:
+        if q.section == "technical":
+            actual[q.target_competency] = actual.get(q.target_competency, 0) + 1
+    warnings: list[str] = []
+    for competency, expected in expected_counts.items():
+        got = actual.get(competency, 0)
+        if expected > 0 and got < expected:
+            warnings.append(
+                f"Competency '{competency}' expected {expected} technical "
+                f"question(s) but the plan has {got} (after quality checks)."
+            )
+    return warnings
+
+
 async def assemble_plan(state: PrepState, deps: Deps) -> PrepState:
     """Join node: stitch the three rounds' questions into the final
     ``QuestionPlan``, ordered by the fixed section order, with the request's
@@ -504,6 +685,75 @@ async def assemble_plan(state: PrepState, deps: Deps) -> PrepState:
     for q in all_questions:
         by_section.setdefault(q.section, []).append(q)
     ordered = [q for section in _SECTION_ORDER for q in by_section.get(section, [])]
+
+    # Deterministic quality pass — see the block above assemble_plan for why
+    # this exists. Order matters: dedupe first (so coverage is checked
+    # against what the candidate will ACTUALLY be asked), then normalize
+    # rubric weights, then repair difficulty ordering.
+    original_count = len(ordered)
+    deduped, dropped = _dedupe_questions(ordered, req.language_mode.primary)
+
+    quality_warnings: list[str] = []
+    # Two independent safety checks before TRUSTING the dedup result — this
+    # pass exists to trim the occasional real overlap between rounds, never
+    # to restructure the interview:
+    #
+    # 1. A GLOBAL cap: removing an implausible SHARE of all questions signals
+    #    something systemically wrong upstream (e.g. a degraded LLM
+    #    returning near-identical boilerplate for every question), not
+    #    genuine duplication.
+    # 2. A PER-SECTION floor: found by testing, not assumed — the global cap
+    #    alone missed a real case. Dropping just ONE question out of ~14
+    #    total stayed comfortably under any global percentage, but that one
+    #    question was the entire behavioral section's only question, so the
+    #    section was silently emptied while the global check saw nothing
+    #    wrong. A section that started non-empty must never end empty,
+    #    regardless of how small the overall removal looks.
+    #
+    # Either check failing bails out of dedup ENTIRELY for this plan, rather
+    # than trying to selectively keep back just enough questions — a few
+    # undetected real duplicates is a far smaller problem than an interview
+    # missing most, or all, of a section.
+    max_droppable = max(2, round(original_count * 0.25))
+    before_counts: dict[str, int] = {}
+    after_counts: dict[str, int] = {}
+    for q in ordered:
+        before_counts[q.section] = before_counts.get(q.section, 0) + 1
+    for q in deduped:
+        after_counts[q.section] = after_counts.get(q.section, 0) + 1
+    emptied_sections = [
+        section
+        for section, before in before_counts.items()
+        if before > 0 and after_counts.get(section, 0) == 0
+    ]
+
+    if len(dropped) > max_droppable or emptied_sections:
+        reason = (
+            f"would have emptied section(s) {emptied_sections}"
+            if emptied_sections
+            else f"an implausible share ({len(dropped)}/{original_count})"
+        )
+        quality_warnings.append(
+            f"Dedup skipped for this plan — {reason} — likely a systemic "
+            "LLM/content issue rather than genuine cross-round overlap. "
+            "Review the generated questions manually."
+        )
+    else:
+        ordered = deduped
+        if dropped:
+            quality_warnings.append(
+                f"Removed {len(dropped)} near-duplicate question(s) generated "
+                f"across rounds: {'; '.join(dropped)}"
+            )
+
+    ordered = _normalize_rubric_weights(ordered)
+    ordered = _reorder_technical_by_difficulty(ordered)
+    quality_warnings.extend(
+        _check_competency_coverage(ordered, state.get("technical_counts", {}))
+    )
+    if quality_warnings:
+        log.warning("assemble_plan quality pass: %s", "; ".join(quality_warnings))
+        await _warn(state, deps, quality_warnings)
 
     plan = QuestionPlan(
         sections_order=list(_SECTION_ORDER),

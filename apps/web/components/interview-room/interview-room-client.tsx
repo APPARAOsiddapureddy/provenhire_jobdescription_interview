@@ -126,7 +126,8 @@ export function InterviewRoomClient({
 
   const planQuestions = view?.context?.plan.questions ?? [];
   const cursor = view?.context?.cursor ?? 0;
-  const currentQuestion = planQuestions[Math.min(cursor, planQuestions.length - 1)];
+  const currentQuestion =
+    planQuestions[Math.min(cursor, planQuestions.length - 1)];
   const stageLabel = currentQuestion
     ? (STAGE_BY_SECTION[currentQuestion.section] ?? "Role Fit")
     : "Role Fit";

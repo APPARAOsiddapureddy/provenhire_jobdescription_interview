@@ -33,6 +33,8 @@ import {
   FullscreenRequiredModal,
   ProctoringBanModal,
 } from "./integrity-overlay";
+import { ProctoringCheck } from "./proctoring-check";
+import { ProctoringViolationModal } from "./proctoring-violation-modal";
 import { useCameraPreview } from "./use-camera-preview";
 import { useMicEnergy } from "./use-mic-energy";
 import { useIntegrityMonitor } from "@/lib/integrity";
@@ -96,6 +98,7 @@ export function InterviewRoomLiveCustom({
   const router = useRouter();
   const sessionRef = React.useRef<InterviewSession | null>(null);
 
+  const [proctoringPassed, setProctoringPassed] = React.useState(false);
   const [floor, setFloor] = React.useState<FloorState>("IDLE");
   const [transcriptText, setTranscriptText] = React.useState("");
   // What the AI is ACTUALLY saying, from the coordination WS's own "speak"
@@ -105,10 +108,19 @@ export function InterviewRoomLiveCustom({
   // in sync with what the candidate hears, no polling lag either.
   const [liveQuestionText, setLiveQuestionText] = React.useState("");
   const [micTrack, setMicTrack] = React.useState<MediaStreamTrack | null>(null);
+  const [rawNoiseMicTrack, setRawNoiseMicTrack] =
+    React.useState<MediaStreamTrack | null>(null);
   const [micReady, setMicReady] = React.useState(false);
   const [canPlayAudio, setCanPlayAudio] = React.useState(true);
   const [micFailureMsg, setMicFailureMsg] = React.useState<string | null>(null);
+  // Non-fatal: the coordination socket dropped and the session is trying to
+  // resume. Without this the candidate just sits in silence for up to ~30s
+  // with no idea whether the interview is still alive.
+  const [reconnecting, setReconnecting] = React.useState<string | null>(null);
   const [attempt, setAttempt] = React.useState(0);
+  const [violationMessage, setViolationMessage] = React.useState<string | null>(
+    null,
+  );
 
   const phase = floorStateToPhase(floor);
   const floorOwner: "ai" | "candidate" | null =
@@ -128,6 +140,12 @@ export function InterviewRoomLiveCustom({
 
   React.useEffect(() => {
     let cancelled = false;
+
+    // Only connect session AFTER proctoring passes
+    if (!proctoringPassed) {
+      return;
+    }
+
     const session = new InterviewSession({
       sessionId,
       agentWsBaseUrl,
@@ -143,8 +161,22 @@ export function InterviewRoomLiveCustom({
       onAudioBlocked: () => {
         if (!cancelled) setCanPlayAudio(false);
       },
+      // `n` rather than `attempt`: the outer `attempt` state is the manual
+      // mic-retry counter, and shadowing it here reads as the same thing.
+      onReconnecting: (n, maxAttempts) => {
+        if (cancelled) return;
+        setReconnecting(
+          `Connection lost — reconnecting (${n}/${maxAttempts})…`,
+        );
+      },
+      onReconnected: () => {
+        if (!cancelled) setReconnecting(null);
+      },
       onError: (err: InterviewSessionError) => {
         if (cancelled) return;
+        // Retries are over one way or another — don't leave a stale
+        // "reconnecting…" banner over the failure state.
+        setReconnecting(null);
         if (err.kind === "mic_permission_denied") {
           setMicFailureMsg(
             "We couldn't access your microphone. Check your browser's microphone permission, then try again.",
@@ -168,6 +200,7 @@ export function InterviewRoomLiveCustom({
           return;
         }
         setMicTrack(session.micTrack);
+        setRawNoiseMicTrack(session.rawNoiseMicTrack);
         setMicReady(true);
       })
       .catch(() => {
@@ -179,10 +212,15 @@ export function InterviewRoomLiveCustom({
       session.close();
       sessionRef.current = null;
     };
-  }, [sessionId, agentWsBaseUrl, attempt]);
+  }, [sessionId, agentWsBaseUrl, attempt, proctoringPassed]);
+
+  // Clear transcript when a new question starts
+  React.useEffect(() => {
+    setTranscriptText("");
+  }, [liveQuestionText]);
 
   const micEnergy = useMicEnergy(phase === "listening", micTrack);
-  const { cameraOn, cameraStream, toggleCamera } = useCameraPreview();
+  const { cameraOn, cameraStream } = useCameraPreview();
 
   const [transcriptOpen, setTranscriptOpen] = React.useState(true);
   const [historyOpen, setHistoryOpen] = React.useState(true);
@@ -193,29 +231,11 @@ export function InterviewRoomLiveCustom({
   const [ending, setEnding] = React.useState(false);
   const endingRef = React.useRef(false);
 
-  // Purely cosmetic "get ready" countdown — same rationale as the LiveKit
-  // room: the interviewer's own opening line is in flight server-side
-  // (LLM/TTS latency, possible cold start). Never gates anything real.
-  const [countdownValue, setCountdownValue] = React.useState<number | null>(null);
-  const countdownStartedRef = React.useRef(false);
-  React.useEffect(() => {
-    if (!micReady || countdownStartedRef.current) return;
-    countdownStartedRef.current = true;
-    setCountdownValue(3);
-    const interval = setInterval(() => {
-      setCountdownValue((v) => {
-        if (v === null || v <= 1) {
-          clearInterval(interval);
-          return null;
-        }
-        return v - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [micReady]);
-  React.useEffect(() => {
-    if (phase !== "ready" && countdownValue !== null) setCountdownValue(null);
-  }, [phase, countdownValue]);
+  // NOTE: the old cosmetic "3..2..1" countdown was removed. It only started
+  // once the session had connected — i.e. AFTER the first question was
+  // already on screen — so it read as an interruption ("question, then a
+  // countdown, then the interview") rather than a lead-in. The pre-interview
+  // proctoring check is now the deliberate "get ready" beat.
 
   function repeatQuestion() {
     sessionRef.current?.sendText("Sorry, could you repeat the question?");
@@ -248,16 +268,71 @@ export function InterviewRoomLiveCustom({
   const {
     banner: integrityBanner,
     banned,
+    isBlocked,
     needsFullscreen,
     requestFullscreen,
-  } = useIntegrityMonitor(sessionId, onAutoEnd, micTrack);
+  } = useIntegrityMonitor(
+    sessionId,
+    onAutoEnd,
+    rawNoiseMicTrack,
+    phase === "asking",
+  );
+
+  React.useEffect(() => {
+    if (integrityBanner) {
+      setViolationMessage(integrityBanner.message);
+    }
+  }, [integrityBanner]);
+
+  if (!proctoringPassed) {
+    return (
+      <ProctoringCheck
+        sessionId={sessionId}
+        onPassed={() => setProctoringPassed(true)}
+      />
+    );
+  }
 
   return (
     <>
       {integrityBanner && <IntegrityBanner banner={integrityBanner} />}
       {banned && <ProctoringBanModal onTimeout={onAutoEnd} />}
       {!banned && needsFullscreen && (
-        <FullscreenRequiredModal onContinue={requestFullscreen} />
+        <FullscreenRequiredModal
+          onContinue={requestFullscreen}
+          warning={
+            integrityBanner?.rule === "fullscreen_required"
+              ? integrityBanner.message
+              : null
+          }
+        />
+      )}
+      {isBlocked && (
+        <ProctoringViolationModal
+          message={
+            violationMessage ||
+            "Camera issue detected. Please enable your camera to continue."
+          }
+          onTimeout={onAutoEnd}
+          onRetry={() => {
+            setViolationMessage(null);
+            // Modal stays visible with countdown running until either:
+            // 1. Camera is fixed and face detected (isBlocked clears)
+            // 2. 20 seconds elapse (onTimeout ends interview)
+          }}
+        />
+      )}
+
+      {reconnecting && (
+        <div
+          role="status"
+          className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-3 bg-[#3a2a10] px-6 py-3 text-center text-[13px] text-white shadow-lg"
+        >
+          <span>{reconnecting}</span>
+          <span className="text-white/60">
+            Stay on this page — your interview is being resumed.
+          </span>
+        </div>
       )}
 
       {micFailureMsg && (
@@ -280,7 +355,10 @@ export function InterviewRoomLiveCustom({
 
       {!canPlayAudio && (
         <ModalScaffold titleId="audio-unlock-title">
-          <p id="audio-unlock-title" className="text-[19px] font-semibold text-white">
+          <p
+            id="audio-unlock-title"
+            className="text-[19px] font-semibold text-white"
+          >
             Enable interview audio
           </p>
           <p className="text-[13px] leading-relaxed text-white/60">
@@ -310,7 +388,13 @@ export function InterviewRoomLiveCustom({
         floorOwner={floorOwner}
         questionIndex={questionIndex}
         totalQuestions={totalQuestions}
-        questionText={liveQuestionText || questionText}
+        // ONLY the text the interviewer actually speaks. Falling back to the
+        // polled plan question here meant the raw planned text flashed up
+        // first ("Can you briefly share...") and was then replaced by what
+        // the model really said (greeting + the same question) — reading as
+        // two different questions. Until the AI speaks there is no question
+        // yet, so show the waiting state rather than a preview of one.
+        questionText={liveQuestionText}
         transcriptText={transcriptText}
         transcriptOpen={transcriptOpen}
         onToggleTranscript={() => setTranscriptOpen((v) => !v)}
@@ -318,7 +402,6 @@ export function InterviewRoomLiveCustom({
         micReady={micReady}
         cameraOn={cameraOn}
         cameraStream={cameraStream}
-        onToggleCamera={() => void toggleCamera()}
         historyOpen={historyOpen}
         onToggleHistory={() => setHistoryOpen((v) => !v)}
         fullTranscriptMode={fullTranscriptMode}
@@ -330,8 +413,8 @@ export function InterviewRoomLiveCustom({
         onRepeatQuestion={repeatQuestion}
         onEndInterview={() => setShowConfirmEnd(true)}
         ending={ending}
-        showCountdown={countdownValue !== null}
-        countdownValue={countdownValue}
+        showCountdown={false}
+        countdownValue={null}
         showConfirmEnd={showConfirmEnd}
         onConfirmEnd={() => void endInterview()}
         onCancelEnd={() => setShowConfirmEnd(false)}
