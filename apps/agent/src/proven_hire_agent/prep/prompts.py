@@ -38,6 +38,33 @@ _LANGUAGE_NAMES: dict[str, str] = {
 }
 
 
+# The behavioral round already used candidate.projects for STAR-story
+# grounding; general/coding did not, and fell back to the flat skills list
+# alone — the single richest source of concrete, non-generic question
+# material (real systems the candidate actually built) was sitting in the
+# data and simply never reached most of the prompts. Capped: a CV listing
+# many long project entries would otherwise bloat every round's prompt for
+# diminishing returns — a CV's early entries are conventionally the
+# most-relevant/most-recent, so truncating rather than summarizing is a
+# reasonable trade.
+_MAX_PROJECTS_IN_PROMPT = 5
+_MAX_PROJECT_DESC_CHARS = 160
+
+
+def _format_projects(candidate: CandidateProfile) -> str:
+    """Real CV projects, formatted for prompt injection. Shared across
+    general/coding/behavioral so all three ground questions in the same
+    project data, in the same format."""
+    if not candidate.projects:
+        return "(none listed)"
+    parts = []
+    for p in candidate.projects[:_MAX_PROJECTS_IN_PROMPT]:
+        desc = p.description[:_MAX_PROJECT_DESC_CHARS]
+        tech = f" [{', '.join(p.tech)}]" if p.tech else ""
+        parts.append(f"{p.name}{tech} — {desc}")
+    return "; ".join(parts)
+
+
 def language_name(code: str) -> str:
     """Return a human-readable language name for ``code`` (defaults to the code)."""
     return _LANGUAGE_NAMES.get(code, code)
@@ -203,6 +230,15 @@ def general_round_prompts(
         "definition question (e.g. 'what is a JOIN') in isolation — if a "
         "fundamental must be tested, wrap it in a scenario using this "
         "company's data/domain.\n"
+        "- PREFER grounding a question in one of the candidate's own "
+        "projects (listed below) over an invented company scenario when one "
+        "plausibly fits the competency being probed — 'in the caching layer "
+        "you built for X, how would you handle Y' produces a sharper, more "
+        "verifiable answer than a generic hypothetical, since the candidate "
+        "can be pressed on what they actually did. Not every question needs "
+        "this — fall back to the company-domain rule above when no listed "
+        "project fits naturally; never force a project reference that "
+        "doesn't fit the competency.\n"
         "- target_competency for each technical question MUST be exactly one "
         "of the competency keys named in the allocation above.\n"
         "- Rising difficulty 1-5 across the technical section.\n"
@@ -248,7 +284,8 @@ def general_round_prompts(
         f"{' -> '.join(company.interview_process)}\n\n"
         f"CANDIDATE: {candidate.headline}; {candidate.years_experience}y; "
         f"skills: {', '.join(candidate.skills)}; "
-        f"achievements: {'; '.join(candidate.achievements)}\n\n"
+        f"achievements: {'; '.join(candidate.achievements)}\n"
+        f"CANDIDATE PROJECTS: {_format_projects(candidate)}\n\n"
         "GAP TO PROBE:\n"
         f"- probe_targets: {', '.join(gap.probe_targets)}\n"
         f"- missing_skills: {', '.join(gap.missing_skills)}\n"
@@ -283,7 +320,11 @@ def coding_round_prompts(
         "leetcode session.\n\n"
         f"- Ground the problem in the '{topic}' topic ({topic_meta['description']}), "
         f"using the candidate's ACTUAL stack ({', '.join(job.tech_stack)}) — never "
-        "a generic algorithms-textbook prompt disconnected from the JD.\n"
+        "a generic algorithms-textbook prompt disconnected from the JD. If one "
+        "of the candidate's own projects below resembles this topic, you may "
+        "frame the scenario as an extension of a system they've already "
+        "built — e.g. 'in the [project], how would you handle Y' — instead of "
+        "an unrelated hypothetical; only if it genuinely fits the topic.\n"
         f"- Target difficulty {difficulty}/5 for a {job.seniority}-level candidate "
         "at this scope. Favor reasoning and trade-off talk over memorized syntax "
         "or DSA trivia — this is not a whiteboard-coding round.\n"
@@ -309,6 +350,7 @@ def coding_round_prompts(
         f"ROLE: {job.title} ({job.seniority})\n"
         f"TECH STACK: {', '.join(job.tech_stack)}\n"
         f"CANDIDATE SKILLS: {', '.join(candidate.skills)}\n"
+        f"CANDIDATE PROJECTS: {_format_projects(candidate)}\n"
         f"RELEVANT GAP TO PROBE (if applicable to this topic): {', '.join(gap.probe_targets)}\n"
         f"FALLBACK HINT STYLE (for tone/specificity only, write your own): {topic_meta['hint']}"
         + (f"\n\nPLAYBOOK REFERENCE:\n{hint}" if hint else "")
@@ -355,12 +397,11 @@ def behavioral_round_prompts(
         f"Write each question's text with an 'en' entry.{_localize_note(language_mode)} "
         "Respond ONLY with the requested schema."
     )
-    projects = "; ".join(f"{p.name} — {p.description}" for p in candidate.projects)
     user = (
         f"ROLE: {job.title} ({job.seniority}) at {job.company_name}\n"
         f"CANDIDATE: {candidate.headline}\n"
         f"ACHIEVEMENTS: {'; '.join(candidate.achievements)}\n"
-        f"PROJECTS: {projects}\n\n"
+        f"PROJECTS: {_format_projects(candidate)}\n\n"
         f"BEHAVIORAL GAPS TO PROBE:\n- gaps: {', '.join(gap.gaps)}\n"
         f"- probe_targets: {', '.join(gap.probe_targets)}"
         + (f"\n\nPLAYBOOK REFERENCE:\n{hint}" if hint else "")

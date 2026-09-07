@@ -41,4 +41,8 @@ class PrepState(TypedDict, total=False):
     general_questions: list[PlannedQuestion]
     coding_questions: list[PlannedQuestion]
     behavioral_questions: list[PlannedQuestion]
+    # The competency -> question-count allocation general_round was actually
+    # given, carried through so assemble_plan's post-generation quality pass
+    # can detect coverage that fell short (e.g. after deduping).
+    technical_counts: dict[str, int]
     plan: QuestionPlan

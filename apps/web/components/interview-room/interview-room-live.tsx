@@ -229,7 +229,7 @@ export function InterviewRoomLive({
     banned,
     needsFullscreen,
     requestFullscreen,
-  } = useIntegrityMonitor(sessionId, onAutoEnd, micTrack);
+  } = useIntegrityMonitor(sessionId, onAutoEnd, micTrack, phase === "asking");
 
   return (
     <>

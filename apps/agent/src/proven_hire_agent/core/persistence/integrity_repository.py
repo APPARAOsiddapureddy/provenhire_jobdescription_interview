@@ -25,12 +25,13 @@ _DEFAULTS: dict[str, str] = {
     "camera_required": "strict",
     "copy_paste_detection": "off",
     "devtools_detection": "off",
-    "fullscreen_required": "off",
-    "microphone_monitoring": "off",
+    "fullscreen_required": "strict",
+    "microphone_monitoring": "strict",
     "camera_ai_detection": "strict",
+    "gaze_detection": "monitor",
     "three_strike_auto_end": "strict",
     "screen_recording_enabled": "off",
-    "tab_switching_detection": "off",
+    "tab_switching_detection": "strict",
 }
 
 

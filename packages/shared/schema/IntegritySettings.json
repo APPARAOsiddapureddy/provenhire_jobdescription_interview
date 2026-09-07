@@ -58,6 +58,15 @@
         "strict"
       ]
     },
+    "gaze_detection": {
+      "default": "off",
+      "type": "string",
+      "enum": [
+        "off",
+        "monitor",
+        "strict"
+      ]
+    },
     "three_strike_auto_end": {
       "type": "string",
       "enum": [

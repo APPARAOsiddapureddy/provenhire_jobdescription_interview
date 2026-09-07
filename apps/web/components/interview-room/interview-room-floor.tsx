@@ -426,17 +426,25 @@ function QuestionCard({ questionText }: { questionText: string }) {
         className="flex items-center rounded-room bg-black px-8 py-8"
         style={{ minHeight }}
       >
-        <p
-          className="font-semibold text-white"
-          style={{
-            fontSize,
-            fontWeight: 780,
-            lineHeight: 1.04,
-            textShadow: "0 2px 24px oklch(0 0 0 / 0.5)",
-          }}
-        >
-          {questionText}
-        </p>
+        {questionText ? (
+          <p
+            className="font-semibold text-white"
+            style={{
+              fontSize,
+              fontWeight: 780,
+              lineHeight: 1.04,
+              textShadow: "0 2px 24px oklch(0 0 0 / 0.5)",
+            }}
+          >
+            {questionText}
+          </p>
+        ) : (
+          // No question yet — the interviewer hasn't spoken. Deliberately a
+          // neutral waiting state, never a preview of the planned question.
+          <p className="text-[15px] font-medium text-white/40">
+            Waiting for the interviewer&hellip;
+          </p>
+        )}
       </div>
     </div>
   );
@@ -453,12 +461,33 @@ function TranscriptPanel({
   onToggleTranscript: () => void;
   listening: boolean;
 }) {
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  // "Stick to bottom" rather than an unconditional scroll: a long answer
+  // must keep the newest words in view as they arrive, but if the candidate
+  // has deliberately scrolled up to re-read something, yanking them back
+  // down on every STT update would make that impossible.
+  const stickToBottomRef = React.useRef(true);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }
+
+  // Layout effect so the scroll lands in the same frame the new text paints,
+  // avoiding a visible jump.
+  React.useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [transcriptText]);
+
   return (
     <div
-      className="ph-scrollbar overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03] transition-[height] duration-300"
-      style={{ height: transcriptOpen ? "min(132px, 16vh)" : "70px" }}
+      className="flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03] transition-[height] duration-300"
+      style={{ height: transcriptOpen ? "min(180px, 22vh)" : "70px" }}
     >
-      <div className="flex items-center justify-between px-4 py-3">
+      <div className="flex shrink-0 items-center justify-between px-4 py-3">
         <PHSectionLabel className="!text-white/40">
           Live transcript
         </PHSectionLabel>
@@ -471,7 +500,14 @@ function TranscriptPanel({
         </button>
       </div>
       {transcriptOpen && (
-        <div className="px-4 pb-3 text-[13px] leading-relaxed text-white/75">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          // min-h-0 is required for a flex child to be allowed to shrink
+          // below its content height — without it the panel grows instead
+          // of scrolling and the overflow stays clipped.
+          className="ph-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pb-3 text-[13px] leading-relaxed text-white/75"
+        >
           {transcriptText || (
             <span className="text-white/30">Waiting for the candidate…</span>
           )}

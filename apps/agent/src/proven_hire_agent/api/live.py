@@ -44,6 +44,7 @@ from ..core.rate_limit import SlidingWindowRateLimiter, client_ip
 from ..core.session_status import TERMINAL_STATUSES
 from ..live import orchestrator as orch
 from ..live import protocol, resilience
+from ..live import state as live_state
 from ..live.guard import SessionGuard, wrap_up_line
 from ..live.orchestrator import CompleteFn, CompletionResult, LiveTurnSession, ToolCall, TurnResult
 from ..live.persistence import flush_checkpoint, persist_and_score
@@ -63,7 +64,12 @@ ws_router = APIRouter()
 # legitimate candidate session should ever hit them), not tuned against
 # real traffic yet.
 _deepgram_token_limiter = SlidingWindowRateLimiter(max_events=10, window_sec=60.0)
-_tts_limiter = SlidingWindowRateLimiter(max_events=40, window_sec=60.0)
+# The client now splits each spoken turn into per-sentence TTS calls
+# (pipelined fetch+play, cuts time-to-first-audio) instead of one call per
+# turn, so a single reply can cost several events here instead of one —
+# raised from 40 to keep the same "no legitimate session should ever hit
+# this" headroom under that new pattern.
+_tts_limiter = SlidingWindowRateLimiter(max_events=100, window_sec=60.0)
 # Keyed by session_id (not IP): each candidate turn is one real LLM call —
 # 20/min is generous for genuine back-and-forth conversation (well under
 # one every 3s) while still bounding a stuck/looping client from spamming
@@ -588,6 +594,20 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
             await _checkpoint()
         guard.start()
 
+        # True only when the turn immediately before this one SAVED an answer
+        # (the model called submit_answer and the cursor advanced). A
+        # continuation may only be appended to answers[-1] when that holds —
+        # otherwise the last saved answer belongs to an earlier question. The
+        # counter-example is a follow-up: the cursor has not moved and nothing
+        # was saved, so appending would corrupt a previous question's answer.
+        just_submitted_answer = False
+        # Cursor positions already re-asked once because of an interruption.
+        # Without this bound the interview can livelock: the candidate talks
+        # over the re-asked question, which re-attributes and re-asks again,
+        # forever. One recovery per question; after that their speech is taken
+        # at face value as the answer to the question actually on screen.
+        reasked_cursors: set[int] = set()
+
         while not session.should_end and not facade.ended:
             raw = await websocket.receive_text()
             try:
@@ -615,6 +635,46 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                     )
                 )
                 continue
+            # The candidate spoke while the interviewer was still asking the
+            # CURRENT question, so they cannot have been replying to it —
+            # these words continue the answer they were already giving, which
+            # the silence timeout cut short. Append them to that answer and
+            # ask the current question again, rather than recording them
+            # against a question the candidate never actually heard.
+            #
+            # Deliberately deterministic (no LLM turn): it only appends to an
+            # existing answer and re-reads a question we already hold, both
+            # safe. It never rewinds the cursor, because submit_answer's
+            # save-and-advance is atomic on purpose.
+            #
+            # Empty `answers` means this happened during the FIRST question —
+            # nothing to continue, so it falls through and simply becomes the
+            # start of that first answer.
+            cursor = ud.ctx.cursor
+            if (
+                msg.get("continues_previous")
+                and just_submitted_answer
+                and ud.ctx.answers
+                and cursor not in reasked_cursors
+            ):
+                previous = ud.ctx.answers[-1]
+                previous.transcript = f"{previous.transcript} {text}".strip()
+                live_state.add_turn(ud, "user", text)
+                reasked_cursors.add(cursor)
+                current_q = live_state.current_question(ud)
+                if current_q is not None:
+                    reask = orch._localized(
+                        current_q.text, ud.ctx.plan.language_mode.primary
+                    )
+                    await websocket.send_json(protocol.speak(reask))
+                    live_state.add_turn(ud, "assistant", reask)
+                await _checkpoint()
+                # The re-asked question now awaits a fresh answer, so a later
+                # continuation must not append to the same record again.
+                just_submitted_answer = False
+                continue
+
+            answers_before = len(ud.ctx.answers)
             result = await _safe_run_turn(text)
             if result is None:
                 # Every provider failed for THIS turn — the candidate's
@@ -629,6 +689,7 @@ async def live_session_ws(websocket: WebSocket, session_id: str) -> None:
                     )
                 )
                 continue
+            just_submitted_answer = len(ud.ctx.answers) > answers_before
             if result.reply_text:
                 await websocket.send_json(protocol.speak(result.reply_text))
             await _checkpoint()
